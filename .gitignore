@@ -1,0 +1,38 @@
+# OS
+.DS_Store
+Thumbs.db
+tasks.md
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Node (repo tooling)
+node_modules/
+web/node_modules/
+web/dist/
+
+# Go build / test artifacts
+*.out
+*.test
+coverage.out
+coverage.txt
+
+# Project build artifacts
+dist/
+app/semiclaw
+app/semiclaw-*
+
+# Runtime / local state
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+.tmp/
+tmp/
+
+# Local app data (if generated inside repo)
+.semiclaw/
