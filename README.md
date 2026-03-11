@@ -1,6 +1,9 @@
-# Semiclaw CLI MVP (Go)
+# Semiclaw
+<p align="left">
+  <img src="assets/semiclaw-mark.svg" alt="Semiclaw half-paw claw icon" width="88" />
+</p>
 
-CLI-only Semiclaw-style MVP implementation.
+A specified use case local focused. Surely, this is inspired by OpenClaw.
 
 ## Stack
 - Backend: Go CLI
