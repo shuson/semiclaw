@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+
+      - name: Build release artifacts
+        working-directory: ${{ github.workspace }}
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd app
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-linux-x86_64 ./cmd/semiclaw
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-macos-x86_64 ./cmd/semiclaw
+
+          cd ../dist
+          chmod +x semiclaw-linux-x86_64 semiclaw-macos-x86_64
+          tar -czf semiclaw-linux-x86_64.tar.gz semiclaw-linux-x86_64
+          tar -czf semiclaw-macos-x86_64.tar.gz semiclaw-macos-x86_64
+          sha256sum semiclaw-linux-x86_64.tar.gz semiclaw-macos-x86_64.tar.gz > checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/semiclaw-linux-x86_64.tar.gz
+            dist/semiclaw-macos-x86_64.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true

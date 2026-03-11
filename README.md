@@ -130,6 +130,20 @@ go run ./cmd/semiclaw setup \
 cd app && go test ./...
 ```
 
+## GitHub Release Automation
+- A GitHub Actions workflow is configured at `.github/workflows/release.yml`.
+- Push a version tag (for example `v0.1.0`) to trigger automatic build + release asset upload.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Uploaded assets:
+- `semiclaw-linux-x86_64.tar.gz`
+- `semiclaw-macos-x86_64.tar.gz`
+- `checksums.txt`
+
 ## Environment Variables
 - `DATA_DIR` (default: `~/.semiclaw`)
 - `OLLAMA_BASE_URL` (default: `https://ollama.com`)
