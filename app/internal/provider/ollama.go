@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -58,7 +59,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, messages []Message) (string, 
 	reqBody := ollamaChatRequest{
 		Model:    p.model,
 		Messages: messages,
-		Stream:   false,
+		Stream:   true,
 		Think:    true,
 	}
 
@@ -79,7 +80,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, messages []Message) (string, 
 		return "", fmt.Errorf("ollama chat request failed: status=%d body=%s", statusCode, string(body))
 	}
 
-	content, err := parseChatResponse(body)
+	content, err := parseOllamaResponse(body)
 	if err != nil {
 		return "", err
 	}
@@ -199,4 +200,59 @@ func parseChatResponse(data []byte) (string, error) {
 	default:
 		return "", errors.New("ollama response did not include text content")
 	}
+}
+
+func parseOllamaResponse(data []byte) (string, error) {
+	if streamed, ok, err := parseOllamaStreamResponse(data); ok {
+		return streamed, err
+	}
+	return parseChatResponse(data)
+}
+
+func parseOllamaStreamResponse(data []byte) (string, bool, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 8*1024), 4*1024*1024)
+
+	var b strings.Builder
+	parsedAny := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			continue
+		}
+		parsedAny = true
+
+		switch {
+		case chunk.Message.Content != "":
+			b.WriteString(chunk.Message.Content)
+		case chunk.Response != "":
+			b.WriteString(chunk.Response)
+		case chunk.Content != "":
+			b.WriteString(chunk.Content)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", true, fmt.Errorf("decode ollama stream response: %w", err)
+	}
+	if !parsedAny {
+		return "", false, nil
+	}
+
+	content := strings.TrimSpace(b.String())
+	if content == "" {
+		return "", true, errors.New("ollama stream response did not include text content")
+	}
+	return content, true, nil
 }

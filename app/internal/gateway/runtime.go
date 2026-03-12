@@ -75,7 +75,134 @@ func parseReasoningOutput(raw string) (ReasoningOutput, error) {
 	}
 	out.Type = strings.ToLower(strings.TrimSpace(out.Type))
 	if out.Type == "" {
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			if inferred := inferReasoningType(decoded); inferred != "" {
+				out.Type = inferred
+			}
+		}
+	}
+	if out.Type == "" {
 		return ReasoningOutput{}, fmt.Errorf("missing output type")
 	}
+
+	if out.Type == "tool_call" && out.ToolCall == nil {
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			if normalized := normalizeToolCall(decoded); normalized != nil {
+				out.ToolCall = normalized
+			}
+		}
+	}
 	return out, nil
+}
+
+func inferReasoningType(decoded map[string]interface{}) string {
+	if decoded == nil {
+		return ""
+	}
+	if _, ok := decoded["tool_call"]; ok {
+		return "tool_call"
+	}
+	if _, ok := decoded["action"]; ok {
+		return "tool_call"
+	}
+	if _, ok := decoded["tool"]; ok {
+		return "tool_call"
+	}
+	if _, ok := decoded["message"]; ok {
+		return "final"
+	}
+	return ""
+}
+
+func normalizeToolCall(decoded map[string]interface{}) *ToolCall {
+	if decoded == nil {
+		return nil
+	}
+
+	tryFromMap := func(raw map[string]interface{}) *ToolCall {
+		if raw == nil {
+			return nil
+		}
+		tool := strings.TrimSpace(stringFromAny(raw["tool"]))
+		if tool == "" {
+			tool = strings.TrimSpace(stringFromAny(raw["name"]))
+		}
+		if tool == "" {
+			tool = strings.TrimSpace(stringFromAny(raw["tool_name"]))
+		}
+		if tool == "" {
+			return nil
+		}
+
+		input := mapFromAny(raw["input"])
+		if len(input) == 0 {
+			input = mapFromAny(raw["parameters"])
+		}
+		if len(input) == 0 {
+			input = mapFromAny(raw["params"])
+		}
+		if len(input) == 0 {
+			input = mapFromAny(raw["arguments"])
+		}
+		if len(input) == 0 {
+			input = mapFromAny(raw["args"])
+		}
+		if input == nil {
+			input = map[string]interface{}{}
+		}
+
+		return &ToolCall{
+			Tool:      tool,
+			Input:     input,
+			Reasoning: strings.TrimSpace(stringFromAny(raw["reasoning"])),
+		}
+	}
+
+	if nested, ok := decoded["tool_call"].(map[string]interface{}); ok {
+		if normalized := tryFromMap(nested); normalized != nil {
+			return normalized
+		}
+	}
+	if nested, ok := decoded["action"].(map[string]interface{}); ok {
+		if normalized := tryFromMap(nested); normalized != nil {
+			return normalized
+		}
+	}
+	if normalized := tryFromMap(decoded); normalized != nil {
+		return normalized
+	}
+	return nil
+}
+
+func mapFromAny(v interface{}) map[string]interface{} {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		return typed
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+			return decoded
+		}
+	}
+	return nil
+}
+
+func stringFromAny(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch typed := v.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
 }

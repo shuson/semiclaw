@@ -18,6 +18,8 @@ import (
 	"semiclaw/app/internal/webcrawl"
 )
 
+var version = "dev"
+
 func main() {
 	ctx := context.Background()
 
@@ -56,7 +58,7 @@ func main() {
 	})
 	go scheduler.Start(context.Background())
 
-	runner := cli.NewRunner(cfg, store, secretBox, agentService, crawler, hostCommandRunner, pythonRunner, fileRunner, memoryStore, os.Stdin, os.Stdout, os.Stderr)
+	runner := cli.NewRunner(cfg, store, secretBox, agentService, crawler, hostCommandRunner, pythonRunner, fileRunner, memoryStore, version, os.Stdin, os.Stdout, os.Stderr)
 
 	if err := runner.Run(ctx, os.Args[1:]); err != nil {
 		log.Fatalf("%v", err)

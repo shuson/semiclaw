@@ -28,6 +28,7 @@ A specified use case local focused. Surely, this is inspired by OpenClaw.
 - Optional provider API key (not required for local Ollama)
 - Gateway-centric runtime flow: `event -> reasoning -> action -> feedback`
 - Programmatic tool executors: shell, browser, python, file
+- Natural-language cloud operations: users can describe AWS, GCP, or VPS provider tasks in plain language, and Semiclaw can generate Terraform or API-SDK scripts/commands and execute them through its tool pipeline (with permission controls)
 
 ## Run
 From repo root:
@@ -45,6 +46,7 @@ go run ./cmd/semiclaw help
 
 ## CLI Commands
 ```bash
+# use SEMICLAW_DEBUG_LLM=1 to enable debug
 semiclaw setup [--password <value>] [--api-key <value>] [--openai-base-url <url>] [--openai-api-key <key>] [--openai-model <model>] [--soul-seed <value>] [--skip-profile]
 semiclaw login [--password <value>]
 semiclaw logout
@@ -56,6 +58,7 @@ semiclaw agent new
 semiclaw agent config [--system-prompt <text>] [--model <model>] [--base-url <url>] [--provider ollama|openai] [--api-key <key>] [--clear-api-key]
 semiclaw agent switch <name>
 semiclaw agent delete <name>
+semiclaw version
 semiclaw help
 ```
 
@@ -63,8 +66,10 @@ semiclaw help
 - Long-term memory: `remember: I prefer short answers`
 - Cron automation memory: `schedule: daily_summary | 0 18 * * * | summarize key updates`
 - Linux host command execution via natural-language requests (LLM infers command intent and executes safely)
+- Explicit chat override to auto-approve host shell commands for current session (`:allow-shell-all`), while still printing each command before execution
 - URL browsing/content retrieval: `visit https://example.com` or include any `http(s)://...` URL in chat
 - Built-in source inference for Zaobao latest news requests (e.g. `latest 10 news in zaobao china`)
+- Cloud/VPS operations via natural language (examples: “provision an EC2 instance with Terraform”, “list GCP Compute Engine instances”, “update Nginx on my VPS”), where Semiclaw generates and runs the required scripts/commands using shell/python/file tooling
 
 ## Agent Management
 - `semiclaw` is the default general-purpose agent and is created automatically.
@@ -77,6 +82,7 @@ semiclaw help
 ## Chat Modes
 - `semiclaw chat` starts interactive terminal chat mode. Type `exit` or `quit` to leave.
 - `semiclaw chat "your message"` runs a single one-shot chat turn.
+- In interactive chat, use `:allow-shell-all` to skip shell permission prompts for the current session, and `:ask-shell-permission` to restore prompts.
 
 ## Runtime Architecture (Gateway Flow)
 Semiclaw chat now runs as a local orchestration loop:
@@ -140,9 +146,9 @@ git push origin v0.1.0
 ```
 
 Uploaded assets:
-- `semiclaw-linux-x86_64.tar.gz`
-- `semiclaw-macos-x86_64.tar.gz`
-- `checksums.txt`
+- `semiclaw-linux-x86_64-<version>.tar.gz`
+- `semiclaw-macos-x86_64-<version>.tar.gz`
+- `checksums-<version>.txt`
 
 ## Environment Variables
 - `DATA_DIR` (default: `~/.semiclaw`)

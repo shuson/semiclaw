@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh/terminal"
+
 	"semiclaw/app/internal/agent"
 	"semiclaw/app/internal/auth"
 	"semiclaw/app/internal/config"
@@ -36,10 +38,19 @@ const defaultAgentName = "semiclaw"
 const (
 	providerKindOllama = "ollama"
 	providerKindOpenAI = "openai"
+
+	defaultGatewayReasoningSteps  = 6
+	continueGatewayReasoningSteps = 18
 )
 
 var agentNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
+var markdownHeadingPattern = regexp.MustCompile(`^(#{1,6})\s+(.*)$`)
+var markdownBulletPattern = regexp.MustCompile(`^(\s*)[-*+]\s+(.*)$`)
+var markdownOrderedPattern = regexp.MustCompile(`^(\s*)(\d+)\.\s+(.*)$`)
+var markdownLinkPattern = regexp.MustCompile(`\[(.*?)\]\((https?://[^)]+)\)`)
+var markdownCodeSpanPattern = regexp.MustCompile("`([^`]+)`")
+var markdownBoldPattern = regexp.MustCompile(`\*\*(.*?)\*\*`)
 
 type Runner struct {
 	cfg       config.Config
@@ -51,9 +62,12 @@ type Runner struct {
 	pythonCmd *pythoncmd.Runner
 	fileCmd   *filecmd.Runner
 	memory    *memorymd.Store
+	version   string
 	stdin     io.Reader
 	stdout    io.Writer
 	stderr    io.Writer
+
+	allowAllHostShellPermissions bool
 }
 
 type cliTheme struct {
@@ -67,6 +81,13 @@ type chatTurnState struct {
 	webTargetURL     string
 	useWebAgent      bool
 	longTermMemory   string
+}
+
+type interactiveInputResult struct {
+	line        string
+	err         error
+	eof         bool
+	interrupted bool
 }
 
 type hostCommandOutcome struct {
@@ -84,6 +105,7 @@ func NewRunner(
 	pythonCmd *pythoncmd.Runner,
 	fileCmd *filecmd.Runner,
 	memory *memorymd.Store,
+	version string,
 	stdin io.Reader,
 	stdout io.Writer,
 	stderr io.Writer,
@@ -98,6 +120,7 @@ func NewRunner(
 		pythonCmd: pythonCmd,
 		fileCmd:   fileCmd,
 		memory:    memory,
+		version:   normalizeVersion(version),
 		stdin:     stdin,
 		stdout:    stdout,
 		stderr:    stderr,
@@ -137,6 +160,9 @@ func (r *Runner) Run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "help", "--help", "-h":
 		r.printHelp()
+		return nil
+	case "version", "--version", "-v":
+		r.printVersion()
 		return nil
 	case "setup":
 		return r.runSetup(ctx, args[1:])
@@ -681,7 +707,7 @@ func (r *Runner) runChat(ctx context.Context, args []string) error {
 		if handled {
 			return nil
 		}
-		fmt.Fprintln(r.stdout, response)
+		r.printChatResponse(response)
 		return nil
 	}
 	return r.runInteractiveChat(ctx, owner, activeAgent, activeProviderKind)
@@ -695,15 +721,8 @@ func (r *Runner) runInteractiveChat(
 ) error {
 	out := r.themeFor(r.stdout)
 	fmt.Fprintln(r.stdout, out.info("Interactive chat mode ("+activeAgent.Name+")"))
-	fmt.Fprintln(r.stdout, out.key("Type your message and press Enter. Type 'exit' or 'quit' to leave. Type ':clear' to clear this chat history. Type ':history' to list last 10 inputs."))
+	fmt.Fprintln(r.stdout, out.key("Type your message and press Enter. Type 'exit' or 'quit' to leave. Type ':clear' to clear this chat history. Type ':history' to list last 10 inputs. Type ':allow-shell-all' to auto-approve host shell commands."))
 
-	scanner := bufio.NewScanner(r.stdin)
-	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
-	type inputEvent struct {
-		line string
-		err  error
-		eof  bool
-	}
 	type turnResult struct {
 		response string
 		handled  bool
@@ -717,68 +736,26 @@ func (r *Runner) runInteractiveChat(
 	if err != nil {
 		return err
 	}
-	arrowCursor := -1
-	pendingRecall := ""
 
 	for {
-		fmt.Fprintf(r.stdout, "\n%s> ", activeAgent.Name)
-		inputCh := make(chan inputEvent, 1)
-		go func() {
-			if !scanner.Scan() {
-				if err := scanner.Err(); err != nil {
-					inputCh <- inputEvent{err: err}
-					return
-				}
-				inputCh <- inputEvent{eof: true}
-				return
-			}
-			inputCh <- inputEvent{line: scanner.Text()}
-		}()
-
-		var ev inputEvent
-		select {
-		case <-sigCh:
-			fmt.Fprintln(r.stdout, "\n"+out.info("Ctrl+C received at prompt. Exiting chat."))
-			return nil
-		case next := <-inputCh:
-			ev = next
-		}
-
+		prompt := out.section(activeAgent.Name + "> ")
+		ev := r.readInteractiveInput(prompt, inputHistory)
 		if ev.err != nil {
 			return ev.err
 		}
+		if ev.interrupted {
+			fmt.Fprintln(r.stdout, out.info("Ctrl+C received at prompt. Exiting chat."))
+			return nil
+		}
 		if ev.eof {
-			fmt.Fprintln(r.stdout, "\n"+out.info("Session ended."))
+			fmt.Fprintln(r.stdout, out.info("Session ended."))
 			return nil
 		}
 
 		rawLine := ev.line
 		message := strings.TrimSpace(rawLine)
-		if pendingRecall != "" && message == "" {
-			message = pendingRecall
-			pendingRecall = ""
-		}
 		if message == "" {
 			continue
-		}
-		if isArrowUpSequence(rawLine) {
-			if len(inputHistory) == 0 {
-				fmt.Fprintln(r.stdout, out.warn("No previous command to reuse."))
-				continue
-			}
-			if arrowCursor == -1 {
-				arrowCursor = len(inputHistory) - 1
-			} else if arrowCursor > 0 {
-				arrowCursor--
-			}
-			pendingRecall = inputHistory[arrowCursor]
-			// Replace the visible raw escape sequence with the recalled input preview.
-			fmt.Fprintf(r.stdout, "\r\033[2K%s> %s\n", activeAgent.Name, pendingRecall)
-			fmt.Fprintln(r.stdout, out.info("Loaded from history. Press Enter to run, or type a new message."))
-			continue
-		}
-		if !isArrowUpSequence(rawLine) {
-			arrowCursor = -1
 		}
 		switch strings.ToLower(message) {
 		case "exit", "quit", ":q":
@@ -789,8 +766,6 @@ func (r *Runner) runInteractiveChat(
 				fmt.Fprintf(r.stderr, "chat error: %v\n", err)
 			}
 			inputHistory = nil
-			arrowCursor = -1
-			pendingRecall = ""
 			continue
 		case ":history":
 			if err := r.printInputHistoryFromSlice(inputHistory, 10); err != nil {
@@ -799,7 +774,6 @@ func (r *Runner) runInteractiveChat(
 			continue
 		}
 		inputHistory = appendInputHistory(inputHistory, message, 500)
-		arrowCursor = -1
 
 		turnCtx, cancelTurn := context.WithCancel(ctx)
 		resultCh := make(chan turnResult, 1)
@@ -832,7 +806,7 @@ func (r *Runner) runInteractiveChat(
 				if result.handled {
 					goto nextTurn
 				}
-				fmt.Fprintf(r.stdout, "\n%s\n", result.response)
+				r.printChatResponse(result.response)
 				goto nextTurn
 			}
 		}
@@ -840,6 +814,163 @@ func (r *Runner) runInteractiveChat(
 	nextTurn:
 		if interrupted {
 			continue
+		}
+	}
+}
+
+func (r *Runner) readInteractiveInput(prompt string, history []string) interactiveInputResult {
+	file, ok := r.stdin.(*os.File)
+	if !ok || !isTerminalFile(file) {
+		fmt.Fprint(r.stdout, prompt)
+		reader := bufio.NewReader(r.stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if line == "" {
+					return interactiveInputResult{eof: true}
+				}
+				return interactiveInputResult{line: line}
+			}
+			return interactiveInputResult{err: err}
+		}
+		return interactiveInputResult{line: line}
+	}
+
+	fd := int(file.Fd())
+	oldState, err := terminal.MakeRaw(fd)
+	if err != nil {
+		return interactiveInputResult{err: err}
+	}
+	defer func() {
+		_ = terminal.Restore(fd, oldState)
+	}()
+
+	fmt.Fprint(r.stdout, prompt)
+	reader := bufio.NewReader(file)
+	lineRunes := make([]rune, 0, 128)
+	cursor := 0
+	historyIndex := len(history)
+	draft := ""
+
+	render := func() {
+		fmt.Fprintf(r.stdout, "\r\033[2K%s%s", prompt, string(lineRunes))
+		if tail := len(lineRunes) - cursor; tail > 0 {
+			fmt.Fprintf(r.stdout, "\033[%dD", tail)
+		}
+	}
+
+	for {
+		ch, _, readErr := reader.ReadRune()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				fmt.Fprint(r.stdout, "\r\n")
+				if len(lineRunes) == 0 {
+					return interactiveInputResult{eof: true}
+				}
+				return interactiveInputResult{line: string(lineRunes)}
+			}
+			return interactiveInputResult{err: readErr}
+		}
+
+		switch ch {
+		case '\r', '\n':
+			fmt.Fprint(r.stdout, "\r\n")
+			return interactiveInputResult{line: string(lineRunes)}
+		case 3:
+			fmt.Fprint(r.stdout, "\r\n")
+			return interactiveInputResult{interrupted: true}
+		case 4:
+			if len(lineRunes) == 0 {
+				fmt.Fprint(r.stdout, "\r\n")
+				return interactiveInputResult{eof: true}
+			}
+		case 8, 127:
+			if cursor > 0 {
+				lineRunes = append(lineRunes[:cursor-1], lineRunes[cursor:]...)
+				cursor--
+				render()
+			}
+		case 27:
+			next, _, escErr := reader.ReadRune()
+			if escErr != nil || next != '[' {
+				continue
+			}
+			code, _, codeErr := reader.ReadRune()
+			if codeErr != nil {
+				continue
+			}
+			switch code {
+			case 'A':
+				if len(history) == 0 {
+					continue
+				}
+				if historyIndex == len(history) {
+					draft = string(lineRunes)
+				}
+				if historyIndex > 0 {
+					historyIndex--
+					lineRunes = []rune(history[historyIndex])
+					cursor = len(lineRunes)
+					render()
+				}
+			case 'B':
+				if len(history) == 0 {
+					continue
+				}
+				if historyIndex < len(history)-1 {
+					historyIndex++
+					lineRunes = []rune(history[historyIndex])
+				} else if historyIndex == len(history)-1 {
+					historyIndex = len(history)
+					lineRunes = []rune(draft)
+				}
+				cursor = len(lineRunes)
+				render()
+			case 'C':
+				if cursor < len(lineRunes) {
+					cursor++
+					render()
+				}
+			case 'D':
+				if cursor > 0 {
+					cursor--
+					render()
+				}
+			case 'H':
+				cursor = 0
+				render()
+			case 'F':
+				cursor = len(lineRunes)
+				render()
+			default:
+				if code >= '0' && code <= '9' {
+					var seq []rune
+					seq = append(seq, code)
+					for {
+						extra, _, seqErr := reader.ReadRune()
+						if seqErr != nil {
+							break
+						}
+						seq = append(seq, extra)
+						if extra == '~' {
+							break
+						}
+					}
+					if len(seq) >= 2 && seq[0] == '3' && seq[len(seq)-1] == '~' && cursor < len(lineRunes) {
+						lineRunes = append(lineRunes[:cursor], lineRunes[cursor+1:]...)
+						render()
+					}
+				}
+			}
+		default:
+			if ch < 32 {
+				continue
+			}
+			lineRunes = append(lineRunes, 0)
+			copy(lineRunes[cursor+1:], lineRunes[cursor:])
+			lineRunes[cursor] = ch
+			cursor++
+			render()
 		}
 	}
 }
@@ -888,7 +1019,11 @@ func (r *Runner) clearCurrentChatHistory(ctx context.Context, owner *db.Owner, a
 
 func isHistoryControlInput(input string) bool {
 	trimmed := strings.TrimSpace(strings.ToLower(input))
-	return trimmed == ":clear" || trimmed == ":history" || isArrowUpSequence(trimmed)
+	return trimmed == ":clear" ||
+		trimmed == ":history" ||
+		trimmed == ":allow-shell-all" ||
+		trimmed == ":ask-shell-permission" ||
+		isArrowUpSequence(trimmed)
 }
 
 func appendInputHistory(history []string, input string, maxItems int) []string {
@@ -901,6 +1036,95 @@ func appendInputHistory(history []string, input string, maxItems int) []string {
 		history = history[len(history)-maxItems:]
 	}
 	return history
+}
+
+func (r *Runner) printChatResponse(response string) {
+	rendered := renderMarkdownForTerminal(response, r.themeFor(r.stdout), isTerminalFile(r.stdout))
+	fmt.Fprintln(r.stdout, "")
+	fmt.Fprintln(r.stdout, rendered)
+}
+
+func renderMarkdownForTerminal(input string, out cliTheme, render bool) string {
+	text := strings.TrimSpace(input)
+	if text == "" {
+		return ""
+	}
+	if !render {
+		return text
+	}
+
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	var b strings.Builder
+	inFence := false
+
+	appendLine := func(line string) {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(line)
+	}
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, " \t")
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			appendLine("  " + out.command(line))
+			continue
+		}
+		if trimmed == "" {
+			appendLine("")
+			continue
+		}
+		if strings.HasPrefix(trimmed, ">") {
+			appendLine(out.key("│ ") + renderInlineMarkdown(strings.TrimSpace(strings.TrimPrefix(trimmed, ">")), out))
+			continue
+		}
+		if heading := markdownHeadingPattern.FindStringSubmatch(trimmed); len(heading) == 3 {
+			level := len(heading[1])
+			content := renderInlineMarkdown(strings.TrimSpace(heading[2]), out)
+			switch level {
+			case 1:
+				appendLine(out.title(content))
+			case 2:
+				appendLine(out.section(content))
+			default:
+				appendLine(out.value(content))
+			}
+			continue
+		}
+		if bullet := markdownBulletPattern.FindStringSubmatch(line); len(bullet) == 3 {
+			appendLine(bullet[1] + "• " + renderInlineMarkdown(strings.TrimSpace(bullet[2]), out))
+			continue
+		}
+		if ordered := markdownOrderedPattern.FindStringSubmatch(line); len(ordered) == 4 {
+			appendLine(ordered[1] + ordered[2] + ". " + renderInlineMarkdown(strings.TrimSpace(ordered[3]), out))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "---") || strings.HasPrefix(trimmed, "***") {
+			appendLine(out.key(strings.Repeat("─", 24)))
+			continue
+		}
+		appendLine(renderInlineMarkdown(line, out))
+	}
+	return b.String()
+}
+
+func renderInlineMarkdown(line string, out cliTheme) string {
+	rendered := markdownLinkPattern.ReplaceAllString(line, `$1 ($2)`)
+	rendered = markdownBoldPattern.ReplaceAllString(rendered, `$1`)
+	rendered = markdownCodeSpanPattern.ReplaceAllStringFunc(rendered, func(segment string) string {
+		match := markdownCodeSpanPattern.FindStringSubmatch(segment)
+		if len(match) != 2 {
+			return segment
+		}
+		return out.command(match[1])
+	})
+	return rendered
 }
 
 func (r *Runner) printCurrentInputHistory(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, limit int) error {
@@ -943,6 +1167,17 @@ func (r *Runner) processChatTurn(
 	if strings.TrimSpace(message) == "" {
 		return "", false, errors.New("message is required")
 	}
+
+	continueRequested := isContinueChatRequest(message)
+	awaitingContinuation := false
+	if continueRequested {
+		awaitingContinuation = r.wasAwaitingContinuationPrompt(ctx, owner, activeAgent)
+	}
+
+	if handled := r.handleHostShellPermissionIntent(message); handled {
+		_ = r.store.SaveMessage(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), "user", message)
+		return "", true, nil
+	}
 	if r.memory != nil {
 		_ = r.memory.AppendDaily(activeAgent.Name, "chat.user", fmt.Sprintf("%s: %s", activeAgent.Name, message))
 	}
@@ -978,6 +1213,9 @@ func (r *Runner) processChatTurn(
 		state := r.newChatTurnState(owner, activeAgent, message)
 		r.applyLongTermMemoryContext(activeAgent, message, &state)
 		r.resolveWebIntentFromMemory(message, &state)
+		if continueRequested && awaitingContinuation {
+			state.effectiveMessage = "Continue the unfinished prior task from context and keep using structured tool calls until completion.\n\nUser confirmation:\n" + message
+		}
 
 		outcome, err := r.runHostCommandPhase(ctx, setPhase, providerClient, activeAgent, message, &state)
 		if err != nil {
@@ -1020,11 +1258,16 @@ func (r *Runner) processChatTurn(
 		)
 
 		setPhase("Thinking..")
+		requestMaxSteps := defaultGatewayReasoningSteps
+		if continueRequested {
+			requestMaxSteps = continueGatewayReasoningSteps
+		}
 		result, runErr := gatewayService.HandleEvent(ctx, gateway.Request{
 			OwnerScopedID: state.userScope,
 			AgentName:     activeAgent.Name,
 			SystemPrompt:  state.systemPrompt,
 			Event:         gateway.Event{Message: state.effectiveMessage},
+			MaxSteps:      requestMaxSteps,
 		})
 		if runErr != nil {
 			return runErr
@@ -2184,6 +2427,99 @@ func composeHostAwareIntentInput(userMessage string) string {
 	return b.String()
 }
 
+func parseHostShellPermissionIntent(message string) (allowAll bool, handled bool) {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		return false, false
+	}
+
+	switch normalized {
+	case ":allow-shell-all", ":allow-all-shell":
+		return true, true
+	case ":ask-shell-permission", ":require-shell-permission", ":disable-shell-all":
+		return false, true
+	}
+
+	allowPhrases := []string{
+		"allow all shell permission",
+		"allow all shell permissions",
+		"allow all host shell permission",
+		"allow all host shell permissions",
+		"allow all shell commands",
+		"approve all shell commands",
+		"enable all shell permissions",
+		"grant all shell permissions",
+		"execute commands without asking for permission",
+		"run commands without asking for permission",
+	}
+	disablePhrases := []string{
+		"ask for shell permission",
+		"require shell permission",
+		"disable all shell permissions",
+		"stop allowing all shell commands",
+		"don't allow all shell commands",
+		"do not allow all shell commands",
+	}
+	for _, phrase := range disablePhrases {
+		if strings.Contains(normalized, phrase) {
+			return false, true
+		}
+	}
+	for _, phrase := range allowPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true, true
+		}
+	}
+
+	return false, false
+}
+
+func isContinueChatRequest(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	switch normalized {
+	case "continue", "yes continue", "continue please", "go on", "proceed", "keep going":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runner) wasAwaitingContinuationPrompt(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) bool {
+	if r.store == nil || owner == nil || activeAgent == nil {
+		return false
+	}
+	history, err := r.store.GetRecentMessages(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), 6)
+	if err != nil {
+		return false
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		role := strings.ToLower(strings.TrimSpace(history[i].Role))
+		if role == "assistant" {
+			return strings.Contains(history[i].Content, "Would you like me to continue? (reply with: continue)")
+		}
+	}
+	return false
+}
+
+func (r *Runner) handleHostShellPermissionIntent(message string) bool {
+	allowAll, handled := parseHostShellPermissionIntent(message)
+	if !handled {
+		return false
+	}
+
+	r.allowAllHostShellPermissions = allowAll
+	out := r.themeFor(r.stdout)
+	if allowAll {
+		fmt.Fprintln(r.stdout, out.success("Host shell permission mode updated: auto-approve all commands for this chat session."))
+		fmt.Fprintln(r.stdout, out.info("Commands will still be shown before execution."))
+	} else {
+		fmt.Fprintln(r.stdout, out.info("Host shell permission mode updated: prompts are required again for sensitive commands."))
+	}
+	return true
+}
+
 func requiresHostCommandApproval(command string) bool {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "" {
@@ -2729,6 +3065,10 @@ func (r *Runner) confirmHostCommand(command string) (bool, error) {
 	out := r.themeFor(r.stdout)
 	fmt.Fprintln(r.stdout, out.warn("Host command execution requested"))
 	fmt.Fprintln(r.stdout, out.kv("💻 Command", command))
+	if r.allowAllHostShellPermissions {
+		fmt.Fprintln(r.stdout, out.info("Auto-approved by user setting. Executing command."))
+		return true, nil
+	}
 
 	file, ok := r.stdin.(*os.File)
 	if !ok {
@@ -2836,6 +3176,7 @@ func filepathDir(path string) string {
 func (r *Runner) printHelp() {
 	out := r.themeFor(r.stdout)
 	fmt.Fprintln(r.stdout, out.title("🚀 Semiclaw CLI"))
+	fmt.Fprintln(r.stdout, out.kv("📦 Version", r.version))
 	fmt.Fprintln(r.stdout, "")
 	fmt.Fprintln(r.stdout, out.section("Usage"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw setup")+" [--password <value>] [--api-key <value>] [--openai-base-url <url>] [--openai-api-key <key>] [--openai-model <model>] [--soul-seed <value>] [--skip-profile]")
@@ -2849,7 +3190,20 @@ func (r *Runner) printHelp() {
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw agent config")+" [--system-prompt ... --model ... --base-url ... --provider ollama|openai]")
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw agent switch <name>"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw agent delete <name>"))
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw version"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw help"))
+}
+
+func (r *Runner) printVersion() {
+	fmt.Fprintln(r.stdout, normalizeVersion(r.version))
+}
+
+func normalizeVersion(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "dev"
+	}
+	return trimmed
 }
 
 func (r *Runner) printAgentHelp() {

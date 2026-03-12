@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -58,7 +59,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message) (string, 
 	reqBody := openAIChatRequest{
 		Model:    p.model,
 		Messages: messages,
-		Stream:   false,
+		Stream:   true,
 		Reasoning: &openAIReasoning{
 			Effort: "medium",
 		},
@@ -81,7 +82,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message) (string, 
 		return "", fmt.Errorf("openai-compatible chat request failed: status=%d body=%s", statusCode, string(body))
 	}
 
-	content, err := parseOpenAIChatResponse(body)
+	content, err := parseOpenAIResponse(body)
 	if err != nil {
 		return "", err
 	}
@@ -196,4 +197,82 @@ func parseOpenAIChatResponse(data []byte) (string, error) {
 	}
 
 	return "", fmt.Errorf("openai-compatible response did not include text content")
+}
+
+func parseOpenAIResponse(data []byte) (string, error) {
+	if streamed, ok, err := parseOpenAIStreamResponse(data); ok {
+		return streamed, err
+	}
+	return parseOpenAIChatResponse(data)
+}
+
+func parseOpenAIStreamResponse(data []byte) (string, bool, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 8*1024), 4*1024*1024)
+
+	var b strings.Builder
+	parsedAny := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+					Text    string `json:"text"`
+				} `json:"delta"`
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		parsedAny = true
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		candidate := chunk.Choices[0].Delta.Content
+		if candidate == "" {
+			candidate = chunk.Choices[0].Delta.Text
+		}
+		if candidate == "" {
+			candidate = chunk.Choices[0].Message.Content
+		}
+		if candidate == "" {
+			candidate = chunk.Choices[0].Text
+		}
+		if candidate != "" {
+			b.WriteString(candidate)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", true, fmt.Errorf("decode openai-compatible stream response: %w", err)
+	}
+	if !parsedAny {
+		return "", false, nil
+	}
+
+	content := strings.TrimSpace(b.String())
+	if content == "" {
+		return "", true, fmt.Errorf("openai-compatible stream response did not include text content")
+	}
+	return content, true, nil
 }

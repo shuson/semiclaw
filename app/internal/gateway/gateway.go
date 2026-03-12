@@ -49,6 +49,7 @@ type Request struct {
 	AgentName     string
 	SystemPrompt  string
 	Event         Event
+	MaxSteps      int
 }
 
 func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) {
@@ -57,11 +58,16 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 		return Result{}, err
 	}
 
-	feedback := make([]ToolResult, 0, g.maxSteps)
-	actions := make([]ToolCall, 0, g.maxSteps)
+	stepLimit := g.maxSteps
+	if req.MaxSteps > 0 {
+		stepLimit = req.MaxSteps
+	}
 
-	for step := 0; step < g.maxSteps; step++ {
-		reasoned, _, reasonErr := g.runtime.Reason(ctx, session, req.Event, feedback)
+	feedback := make([]ToolResult, 0, stepLimit)
+	actions := make([]ToolCall, 0, stepLimit)
+
+	for step := 0; step < stepLimit; step++ {
+		reasoned, rawOutput, reasonErr := g.runtime.Reason(ctx, session, req.Event, feedback)
 		if reasonErr != nil {
 			return Result{}, reasonErr
 		}
@@ -78,7 +84,17 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 			return Result{Response: finalText, Actions: actions, FeedbackLoop: feedback}, nil
 		case "tool_call":
 			if reasoned.ToolCall == nil {
-				return Result{}, fmt.Errorf("tool_call type missing tool_call payload")
+				fallback := strings.TrimSpace(reasoned.Message)
+				if fallback == "" {
+					fallback = "I couldn't parse the tool action payload from the model response. Please retry your request."
+				}
+				if strings.TrimSpace(rawOutput) != "" {
+					fallback = fallback + "\n\nRaw model output:\n" + strings.TrimSpace(rawOutput)
+				}
+				if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, fallback); saveErr != nil {
+					return Result{}, saveErr
+				}
+				return Result{Response: fallback, Actions: actions, FeedbackLoop: feedback}, nil
 			}
 			call := *reasoned.ToolCall
 			call.Tool = strings.ToLower(strings.TrimSpace(call.Tool))
@@ -103,7 +119,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 		}
 	}
 
-	final := "I reached the maximum reasoning steps before producing a final response."
+	final := "I reached the maximum reasoning steps before producing a final response.\nWould you like me to continue? (reply with: continue)"
 	if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, final); saveErr != nil {
 		return Result{}, saveErr
 	}

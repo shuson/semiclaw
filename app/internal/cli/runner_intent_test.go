@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"semiclaw/app/internal/hostcmd"
@@ -90,5 +92,85 @@ func TestSuggestFallbackCommand_ForBSDPsSortError(t *testing.T) {
 	}
 	if command != "ps aux | sort -nr -k 3 | head -n 11" {
 		t.Fatalf("command = %q", command)
+	}
+}
+
+func TestParseHostShellPermissionIntent_Enable(t *testing.T) {
+	cases := []string{
+		":allow-shell-all",
+		"allow all shell permissions on host system",
+		"please run commands without asking for permission",
+	}
+	for _, message := range cases {
+		allowAll, handled := parseHostShellPermissionIntent(message)
+		if !handled {
+			t.Fatalf("expected message %q to be handled", message)
+		}
+		if !allowAll {
+			t.Fatalf("expected message %q to enable allow-all mode", message)
+		}
+	}
+}
+
+func TestParseHostShellPermissionIntent_Disable(t *testing.T) {
+	cases := []string{
+		":ask-shell-permission",
+		"disable all shell permissions",
+		"do not allow all shell commands anymore",
+	}
+	for _, message := range cases {
+		allowAll, handled := parseHostShellPermissionIntent(message)
+		if !handled {
+			t.Fatalf("expected message %q to be handled", message)
+		}
+		if allowAll {
+			t.Fatalf("expected message %q to disable allow-all mode", message)
+		}
+	}
+}
+
+func TestConfirmHostCommand_AutoApproveStillDisplaysCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	runner := &Runner{
+		stdin:                        strings.NewReader(""),
+		stdout:                       &stdout,
+		allowAllHostShellPermissions: true,
+	}
+
+	approved, err := runner.confirmHostCommand("echo hello")
+	if err != nil {
+		t.Fatalf("confirmHostCommand returned error: %v", err)
+	}
+	if !approved {
+		t.Fatal("expected command to be auto-approved")
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Host command execution requested") {
+		t.Fatalf("expected execution request header in output, got %q", output)
+	}
+	if !strings.Contains(output, "echo hello") {
+		t.Fatalf("expected command preview in output, got %q", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "auto-approved") {
+		t.Fatalf("expected auto-approved message in output, got %q", output)
+	}
+}
+
+func TestRenderMarkdownForTerminal_BasicFormatting(t *testing.T) {
+	input := "# Title\n- item 1\n1. step\nUse `ls` and [docs](https://example.com)\n```\necho hi\n```"
+	got := renderMarkdownForTerminal(input, cliTheme{color: false}, true)
+
+	wantContains := []string{
+		"Title",
+		"• item 1",
+		"1. step",
+		"Use ls and docs (https://example.com)",
+		"  echo hi",
+	}
+	for _, token := range wantContains {
+		if !strings.Contains(got, token) {
+			t.Fatalf("rendered output missing %q\noutput=%q", token, got)
+		}
 	}
 }

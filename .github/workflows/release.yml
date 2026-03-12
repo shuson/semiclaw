@@ -31,20 +31,20 @@ jobs:
           cd app
           LDFLAGS="-s -w -X main.version=${VERSION}"
 
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-linux-x86_64 ./cmd/semiclaw
-          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-macos-x86_64 ./cmd/semiclaw
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-linux-x86_64-${VERSION} ./cmd/semiclaw
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o ../dist/semiclaw-macos-x86_64-${VERSION} ./cmd/semiclaw
 
           cd ../dist
-          chmod +x semiclaw-linux-x86_64 semiclaw-macos-x86_64
-          tar -czf semiclaw-linux-x86_64.tar.gz semiclaw-linux-x86_64
-          tar -czf semiclaw-macos-x86_64.tar.gz semiclaw-macos-x86_64
-          sha256sum semiclaw-linux-x86_64.tar.gz semiclaw-macos-x86_64.tar.gz > checksums.txt
+          chmod +x semiclaw-linux-x86_64-${VERSION} semiclaw-macos-x86_64-${VERSION}
+          tar -czf semiclaw-linux-x86_64-${VERSION}.tar.gz semiclaw-linux-x86_64-${VERSION}
+          tar -czf semiclaw-macos-x86_64-${VERSION}.tar.gz semiclaw-macos-x86_64-${VERSION}
+          sha256sum semiclaw-linux-x86_64-${VERSION}.tar.gz semiclaw-macos-x86_64-${VERSION}.tar.gz > checksums-${VERSION}.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/semiclaw-linux-x86_64.tar.gz
-            dist/semiclaw-macos-x86_64.tar.gz
-            dist/checksums.txt
+            dist/semiclaw-linux-x86_64-*.tar.gz
+            dist/semiclaw-macos-x86_64-*.tar.gz
+            dist/checksums-*.txt
           generate_release_notes: true
