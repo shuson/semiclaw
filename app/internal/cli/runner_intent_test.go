@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"semiclaw/app/internal/hostcmd"
+	"semiclaw/app/internal/promptbuilder"
 )
 
 func TestDetectWebCrawlIntent_UsesBuiltinZaobaoChinaSource(t *testing.T) {
@@ -129,15 +130,60 @@ func TestParseHostShellPermissionIntent_Disable(t *testing.T) {
 	}
 }
 
+func TestDetectForgetIntent(t *testing.T) {
+	cases := []struct {
+		message    string
+		want       string
+		wantLatest bool
+	}{
+		{message: "forget: aws setup note", want: "aws setup note"},
+		{message: "revoke: saved token", want: "saved token"},
+		{message: "remove memory: terraform project", want: "terraform project"},
+		{message: "revoke memory: vpn note", want: "vpn note"},
+		{message: "remove aws cli memory", want: "aws cli"},
+		{message: "delete old credential memory", want: "old credential"},
+		{message: "revoke temp key memory", want: "temp key"},
+		{message: "ok, forget it", wantLatest: true},
+	}
+	for _, tc := range cases {
+		got, latest, ok := detectForgetIntent(tc.message)
+		if !ok {
+			t.Fatalf("expected forget intent for message %q", tc.message)
+		}
+		if got != tc.want {
+			t.Fatalf("detectForgetIntent(%q) = %q, want %q", tc.message, got, tc.want)
+		}
+		if latest != tc.wantLatest {
+			t.Fatalf("detectForgetIntent(%q) latest=%v, want %v", tc.message, latest, tc.wantLatest)
+		}
+	}
+}
+
+func TestDetectMemoryQueryIntent(t *testing.T) {
+	cases := []string{
+		"any memory",
+		"any momory",
+		"what do you remember",
+		"show memory",
+	}
+	for _, message := range cases {
+		if _, ok := detectMemoryQueryIntent(message); !ok {
+			t.Fatalf("expected memory query intent for %q", message)
+		}
+	}
+}
+
 func TestConfirmHostCommand_AutoApproveStillDisplaysCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	runner := &Runner{
-		stdin:                        strings.NewReader(""),
-		stdout:                       &stdout,
-		allowAllHostShellPermissions: true,
+		stdin:  strings.NewReader(""),
+		stdout: &stdout,
+		allowAllHostShellPermissions: map[string]bool{
+			"owner::agent:semiclaw::session:s1": true,
+		},
 	}
 
-	approved, err := runner.confirmHostCommand("echo hello")
+	approved, err := runner.confirmHostCommand("owner::agent:semiclaw::session:s1", "echo hello")
 	if err != nil {
 		t.Fatalf("confirmHostCommand returned error: %v", err)
 	}
@@ -157,6 +203,53 @@ func TestConfirmHostCommand_AutoApproveStillDisplaysCommand(t *testing.T) {
 	}
 }
 
+func TestConfirmHostCommand_AutoApproveIsSessionScoped(t *testing.T) {
+	var stdout bytes.Buffer
+	runner := &Runner{
+		stdin:  strings.NewReader(""),
+		stdout: &stdout,
+		allowAllHostShellPermissions: map[string]bool{
+			"owner::agent:semiclaw::session:s1": true,
+		},
+	}
+
+	approved, err := runner.confirmHostCommand("owner::agent:semiclaw::session:s2", "echo hello")
+	if err != nil {
+		t.Fatalf("confirmHostCommand returned error: %v", err)
+	}
+	if approved {
+		t.Fatal("expected different session to require confirmation")
+	}
+	if !strings.Contains(stdout.String(), "Non-interactive input detected") {
+		t.Fatalf("expected non-interactive denial message, got %q", stdout.String())
+	}
+}
+
+func TestParseChatSessionCommand(t *testing.T) {
+	cases := []struct {
+		message string
+		want    chatSessionCommand
+		ok      bool
+	}{
+		{message: ":session list", want: chatSessionCommand{action: "list"}, ok: true},
+		{message: ":session new", want: chatSessionCommand{action: "new"}, ok: true},
+		{message: ":session switch 3", want: chatSessionCommand{action: "switch", index: 3}, ok: true},
+		{message: ":session delete 2", want: chatSessionCommand{action: "delete", index: 2}, ok: true},
+		{message: ":session delete", want: chatSessionCommand{action: "delete"}, ok: true},
+		{message: ":session nope", ok: false},
+	}
+
+	for _, tc := range cases {
+		got, ok := parseChatSessionCommand(tc.message)
+		if ok != tc.ok {
+			t.Fatalf("parseChatSessionCommand(%q) handled=%v, want %v", tc.message, ok, tc.ok)
+		}
+		if got != tc.want {
+			t.Fatalf("parseChatSessionCommand(%q) = %#v, want %#v", tc.message, got, tc.want)
+		}
+	}
+}
+
 func TestRenderMarkdownForTerminal_BasicFormatting(t *testing.T) {
 	input := "# Title\n- item 1\n1. step\nUse `ls` and [docs](https://example.com)\n```\necho hi\n```"
 	got := renderMarkdownForTerminal(input, cliTheme{color: false}, true)
@@ -171,6 +264,36 @@ func TestRenderMarkdownForTerminal_BasicFormatting(t *testing.T) {
 	for _, token := range wantContains {
 		if !strings.Contains(got, token) {
 			t.Fatalf("rendered output missing %q\noutput=%q", token, got)
+		}
+	}
+}
+
+func TestComposeSuperAdminSystemPrompt_UsesPromptBuilderSections(t *testing.T) {
+	got := composeSuperAdminSystemPrompt("You are custom base.", promptbuilder.RuntimeInfo{}, "Asia/Singapore", "Use skills.", "")
+	if !strings.Contains(got, "## Tooling") {
+		t.Fatalf("expected tooling section in composed prompt, got %q", got)
+	}
+	if !strings.Contains(got, "Semiclaw Super-Admin Runtime Directive") {
+		t.Fatalf("expected super-admin directive in composed prompt, got %q", got)
+	}
+	if !strings.Contains(got, "## Skills") {
+		t.Fatalf("expected skills section in composed prompt, got %q", got)
+	}
+}
+
+func TestComposeSuperAdminSystemPrompt_AddsSemiclawDomainContextForRelevantKeywords(t *testing.T) {
+	got := composeSuperAdminSystemPrompt("You are custom base.", promptbuilder.RuntimeInfo{}, "Asia/Singapore", "Use skills.", "how does semiclaw MEMORY and CRON work with TOOL safety and skill routing?")
+	required := []string{
+		"Semiclaw Domain Reference",
+		"\"MEMORY\" or \"MEMORY.md\"",
+		"\"CRON\" refers to Semiclaw automation scheduling",
+		"\"TOOL\" refers to Semiclaw structured tool calls",
+		"\"SKILL\" refers to AGENTS.md-guided or injected skill-routing instructions",
+		"\"SAFETY\" refers to Semiclaw execution constraints",
+	}
+	for _, token := range required {
+		if !strings.Contains(got, token) {
+			t.Fatalf("expected %q in composed prompt, got %q", token, got)
 		}
 	}
 }

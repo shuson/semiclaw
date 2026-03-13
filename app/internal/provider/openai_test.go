@@ -45,3 +45,40 @@ func TestParseOpenAIChatResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldRetryWithoutReasoning(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       bool
+	}{
+		{
+			name:       "unsupported reasoning wording",
+			statusCode: 400,
+			body:       `{"error":"model does not support reasoning"}`,
+			want:       true,
+		},
+		{
+			name:       "unprocessable invalid reasoning",
+			statusCode: 422,
+			body:       `{"error":"invalid reasoning field"}`,
+			want:       true,
+		},
+		{
+			name:       "unrelated error",
+			statusCode: 400,
+			body:       `{"error":"quota exceeded"}`,
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldRetryWithoutReasoning(tt.statusCode, []byte(tt.body))
+			if got != tt.want {
+				t.Fatalf("shouldRetryWithoutReasoning() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

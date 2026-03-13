@@ -344,3 +344,11 @@ func (s *Store) DeleteMessagesByUserID(ctx context.Context, userID string) error
 	}
 	return nil
 }
+
+func (s *Store) DeleteMessagesByUserIDPrefix(ctx context.Context, userIDPrefix string) error {
+	const query = `DELETE FROM messages WHERE user_id LIKE ?`
+	if _, err := s.db.ExecContext(ctx, query, userIDPrefix+"%"); err != nil {
+		return fmt.Errorf("delete messages by user_id prefix %q: %w", userIDPrefix, err)
+	}
+	return nil
+}

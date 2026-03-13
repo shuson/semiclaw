@@ -9,6 +9,8 @@ tasks.md
 *.swo
 *~
 
+.gocache/
+
 # Node (repo tooling)
 node_modules/
 web/node_modules/

@@ -103,3 +103,94 @@ func TestEnsureMigratesLegacyGlobalFiles(t *testing.T) {
 		t.Fatalf("expected migrated automation run file: %v", err)
 	}
 }
+
+func TestRemoveLongTermMatching_RemovesOnlyMatchingEntries(t *testing.T) {
+	tmp := t.TempDir()
+	store := NewStore(tmp)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if err := store.AppendLongTerm("agent_a", "deploy aws ec2"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+	if err := store.AppendLongTerm("agent_a", "read kubernetes docs"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+
+	removed, err := store.RemoveLongTermMatching("agent_a", "aws ec2")
+	if err != nil {
+		t.Fatalf("RemoveLongTermMatching() error = %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	content, err := store.GetLongTerm("agent_a", 4000)
+	if err != nil {
+		t.Fatalf("GetLongTerm() error = %v", err)
+	}
+	if strings.Contains(strings.ToLower(content), "aws ec2") {
+		t.Fatalf("expected matching entry to be removed, got %q", content)
+	}
+	if !strings.Contains(strings.ToLower(content), "kubernetes docs") {
+		t.Fatalf("expected non-matching entry to remain, got %q", content)
+	}
+}
+
+func TestRemoveLatestLongTerm_RemovesNewestEntry(t *testing.T) {
+	tmp := t.TempDir()
+	store := NewStore(tmp)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if err := store.AppendLongTerm("agent_a", "first note"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+	if err := store.AppendLongTerm("agent_a", "second note"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+
+	removed, ok, err := store.RemoveLatestLongTerm("agent_a")
+	if err != nil {
+		t.Fatalf("RemoveLatestLongTerm() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected latest entry to be removed")
+	}
+	if removed != "second note" {
+		t.Fatalf("removed = %q, want second note", removed)
+	}
+
+	entries, err := store.ListLongTermEntries("agent_a", 10)
+	if err != nil {
+		t.Fatalf("ListLongTermEntries() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0] != "first note" {
+		t.Fatalf("entries = %#v, want only first note", entries)
+	}
+}
+
+func TestListLongTermEntries_ReturnsParsedEntries(t *testing.T) {
+	tmp := t.TempDir()
+	store := NewStore(tmp)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if err := store.AppendLongTerm("agent_a", "alpha"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+	if err := store.AppendLongTerm("agent_a", "beta"); err != nil {
+		t.Fatalf("AppendLongTerm() error = %v", err)
+	}
+
+	entries, err := store.ListLongTermEntries("agent_a", 1)
+	if err != nil {
+		t.Fatalf("ListLongTermEntries() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0] != "beta" {
+		t.Fatalf("entries = %#v, want [beta]", entries)
+	}
+}

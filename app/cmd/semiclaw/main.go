@@ -45,6 +45,7 @@ func main() {
 	}
 
 	agentService := agent.NewService(store)
+	agentService.ConfigurePromptBuilder(cfg.PromptBuilderEnabled, cfg.PromptDefaultMode)
 	crawler := webcrawl.NewFetcher(20 * time.Second)
 	hostCommandRunner := hostcmd.NewRunner(20*time.Second, 64*1024)
 	pythonRunner := pythoncmd.NewRunner(20*time.Second, 64*1024)

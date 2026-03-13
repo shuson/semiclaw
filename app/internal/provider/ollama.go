@@ -123,10 +123,12 @@ func shouldRetryWithoutThinking(statusCode int, body []byte) bool {
 		return false
 	}
 	content := strings.ToLower(string(body))
-	return strings.Contains(content, "think") &&
+	return (strings.Contains(content, "think") || strings.Contains(content, "thinking")) &&
 		(strings.Contains(content, "unknown") ||
 			strings.Contains(content, "unsupported") ||
-			strings.Contains(content, "invalid"))
+			strings.Contains(content, "invalid") ||
+			strings.Contains(content, "does not support") ||
+			strings.Contains(content, "not support"))
 }
 
 func isTimeoutErr(err error) bool {

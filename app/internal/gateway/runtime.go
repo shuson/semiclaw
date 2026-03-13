@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
+	"semiclaw/app/internal/promptbuilder"
 	"semiclaw/app/internal/provider"
 )
 
@@ -35,11 +37,24 @@ func buildRuntimeMessages(state SessionState, event Event, feedback []ToolResult
 	if system == "" {
 		system = "You are Semiclaw. Be practical, clear, and action-oriented."
 	}
-	system += "\n\nYou operate in a loop: event -> reasoning -> action -> feedback."
-	system += "\nOutput JSON only with one of these shapes:"
-	system += "\n1) {\"type\":\"final\",\"message\":\"...\"}"
-	system += "\n2) {\"type\":\"tool_call\",\"tool_call\":{\"tool\":\"shell|browser|python|file\",\"input\":{...},\"reasoning\":\"why\"}}"
-	system += "\nNever output markdown fences."
+	if !strings.Contains(system, "## Tooling") {
+		system = promptbuilder.Build(promptbuilder.BuildParams{
+			BasePrompt:     system,
+			Mode:           promptbuilder.PromptModeFull,
+			AvailableTools: allowedToolNames(state.ToolPolicy),
+			MemoryEnabled:  strings.TrimSpace(state.MemoryContext) != "",
+			Timezone:       state.UserTimezone,
+			SkillsPrompt:   state.SkillsPrompt,
+			Runtime: promptbuilder.RuntimeInfo{
+				OS:       state.Runtime.OS,
+				Arch:     state.Runtime.Arch,
+				Shell:    state.Runtime.Shell,
+				Provider: state.Runtime.Provider,
+				Model:    state.Runtime.Model,
+				Agent:    firstNonEmpty(state.Runtime.Agent, state.AgentName),
+			},
+		})
+	}
 
 	conversation := make([]provider.Message, 0, len(state.History)+4)
 	conversation = append(conversation, provider.Message{Role: "system", Content: system})
@@ -57,17 +72,45 @@ func buildRuntimeMessages(state SessionState, event Event, feedback []ToolResult
 	return conversation
 }
 
+func allowedToolNames(policy map[string]ToolPermission) []string {
+	if len(policy) == 0 {
+		return nil
+	}
+	tools := make([]string, 0, len(policy))
+	for name, permission := range policy {
+		if !permission.Allowed {
+			continue
+		}
+		trimmed := strings.ToLower(strings.TrimSpace(name))
+		if trimmed == "" {
+			continue
+		}
+		tools = append(tools, trimmed)
+	}
+	sort.Strings(tools)
+	return tools
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func parseReasoningOutput(raw string) (ReasoningOutput, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ReasoningOutput{}, fmt.Errorf("empty reasoning output")
 	}
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start < 0 || end <= start {
-		return ReasoningOutput{}, fmt.Errorf("no json object found")
+	objectJSON, err := extractFirstJSONObject(trimmed)
+	if err != nil {
+		return ReasoningOutput{}, err
 	}
-	trimmed = trimmed[start : end+1]
+	trimmed = objectJSON
 
 	var out ReasoningOutput
 	if err := json.Unmarshal([]byte(trimmed), &out); err != nil {
@@ -205,4 +248,48 @@ func stringFromAny(v interface{}) string {
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", v))
 	}
+}
+
+func extractFirstJSONObject(raw string) (string, error) {
+	start := strings.Index(raw, "{")
+	if start < 0 {
+		return "", fmt.Errorf("no json object found")
+	}
+
+	inString := false
+	escaped := false
+	depth := 0
+
+	for i := start; i < len(raw); i++ {
+		ch := raw[i]
+
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return raw[start : i+1], nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("incomplete json object")
 }

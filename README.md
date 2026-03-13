@@ -107,6 +107,25 @@ Key responsibilities:
 - `AgentRuntime`: calls provider and parses structured reasoning output.
 - `Executors`: run concrete actions and return normalized tool results.
 
+## Prompt Builder
+- Semiclaw supports a section-based system prompt builder that can compose identity, tooling contract, runtime metadata, memory guidance, and skills guidance in a deterministic order.
+- Prompt modes:
+  - `full`: includes all core sections plus optional memory/skills sections when available.
+  - `minimal`: includes identity/tooling/runtime/safety/formatting only.
+  - `none`: returns base prompt only (no added sections).
+- Runtime metadata is injected into prompt composition (OS/arch/shell/provider/model/agent/timezone) so command/tool decisions can adapt to the current environment.
+- Skills guidance can be injected via `SEMICLAW_SKILLS_PROMPT`, and Semiclaw also adds a lightweight AGENTS.md hint when present.
+
+### Prompt Builder Rollout
+- Default behavior is backward-compatible: prompt builder is disabled unless `SEMICLAW_PROMPT_BUILDER_ENABLED=true`.
+- Migration path:
+  1. Enable builder with `SEMICLAW_PROMPT_BUILDER_ENABLED=true`.
+  2. Start with `SEMICLAW_PROMPT_MODE=minimal` for lower prompt volatility.
+  3. Move to `SEMICLAW_PROMPT_MODE=full` after validation.
+- Fallback behavior:
+  - If builder is disabled, Semiclaw uses the legacy prompt composition path.
+  - If a model returns malformed reasoning output, Semiclaw falls back to safe final-response handling instead of crashing.
+
 ## Example Local Ollama Flow
 ```bash
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -155,5 +174,9 @@ Uploaded assets:
 - `OLLAMA_BASE_URL` (default: `https://ollama.com`)
 - `OLLAMA_MODEL` (default: `kimi-k2.5:cloud`)
 - `OLLAMA_TIMEOUT_SECONDS` (default: `180`)
+- `SEMICLAW_DEBUG_LLM=1` (default: `0`) enable verbose log
+- `SEMICLAW_PROMPT_BUILDER_ENABLED` (default: `false`) enables section-based system prompt assembly
+- `SEMICLAW_PROMPT_MODE` (default: `full`) accepts `full|minimal|none` when prompt builder is enabled
+- `SEMICLAW_SKILLS_PROMPT` (optional) appends custom skills routing instructions into prompt-builder skill section
 - `MIGRATIONS_DIR` (default: auto-detected `app/migrations`)
   - If not found, built-in embedded migrations are used automatically.

@@ -93,6 +93,133 @@ func (s *Store) GetLongTerm(agentName string, maxChars int) (string, error) {
 	return text, nil
 }
 
+func (s *Store) RemoveLongTermMatching(agentName string, target string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return 0, nil
+	}
+
+	agentName = sanitizeAgentScope(agentName)
+	path := s.memoryFilePath(agentName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	matched := 0
+	needle := strings.ToLower(target)
+	kept := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [") && strings.Contains(strings.ToLower(trimmed), needle) {
+			matched++
+			continue
+		}
+		kept = append(kept, line)
+	}
+
+	if matched == 0 {
+		return 0, nil
+	}
+
+	content := strings.Join(kept, "\n")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return 0, err
+	}
+	return matched, nil
+}
+
+func (s *Store) RemoveLatestLongTerm(agentName string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	agentName = sanitizeAgentScope(agentName)
+	path := s.memoryFilePath(agentName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	index := -1
+	removed := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "- [") {
+			index = i
+			removed = trimmed
+			if closeIndex := strings.Index(removed, "] "); closeIndex >= 0 {
+				removed = strings.TrimSpace(removed[closeIndex+2:])
+			}
+			break
+		}
+	}
+	if index < 0 {
+		return "", false, nil
+	}
+
+	lines = append(lines[:index], lines[index+1:]...)
+	content := strings.Join(lines, "\n")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return "", false, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", false, err
+	}
+	return removed, true, nil
+}
+
+func (s *Store) ListLongTermEntries(agentName string, limit int) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	agentName = sanitizeAgentScope(agentName)
+	path := s.memoryFilePath(agentName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	entries := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- [") {
+			continue
+		}
+		if closeIndex := strings.Index(trimmed, "] "); closeIndex >= 0 {
+			trimmed = strings.TrimSpace(trimmed[closeIndex+2:])
+		}
+		if trimmed != "" {
+			entries = append(entries, trimmed)
+		}
+	}
+
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
 func (s *Store) AppendDaily(agentName string, section string, line string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -43,18 +43,12 @@ func (p *debugProvider) logRequest(messages []Message) {
 	b.WriteString("\n")
 	for i, msg := range messages {
 		b.WriteString(fmt.Sprintf("[LLM DEBUG] [%d] role=%s\n", i, strings.TrimSpace(msg.Role)))
-		b.WriteString("[LLM DEBUG] ")
 		content := strings.TrimSpace(msg.Content)
 		if content == "" {
-			b.WriteString("(empty)\n")
+			b.WriteString("[LLM DEBUG] (empty)\n")
 			continue
 		}
-		lines := strings.Split(content, "\n")
-		for _, line := range lines {
-			b.WriteString(line)
-			b.WriteString("\n[LLM DEBUG] ")
-		}
-		b.WriteString("\n")
+		appendDebugLines(&b, content)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -75,15 +69,50 @@ func (p *debugProvider) logResponse(response string, err error) {
 	}
 	trimmed := strings.TrimSpace(response)
 	if trimmed != "" {
-		b.WriteString("[LLM DEBUG] content:\n[LLM DEBUG] ")
-		lines := strings.Split(trimmed, "\n")
-		for _, line := range lines {
-			b.WriteString(line)
-			b.WriteString("\n[LLM DEBUG] ")
-		}
-		b.WriteString("\n")
+		b.WriteString("[LLM DEBUG] content:\n")
+		appendDebugLines(&b, trimmed)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_, _ = io.WriteString(p.writer, b.String())
+}
+
+func appendDebugLines(b *strings.Builder, content string) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	prev := ""
+	repeat := 0
+
+	flush := func() {
+		if repeat == 0 {
+			return
+		}
+		if repeat == 1 {
+			b.WriteString("[LLM DEBUG] ")
+			b.WriteString(prev)
+			b.WriteString("\n")
+			repeat = 0
+			return
+		}
+		b.WriteString("[LLM DEBUG] ")
+		b.WriteString(prev)
+		b.WriteString(" (x")
+		b.WriteString(fmt.Sprintf("%d", repeat))
+		b.WriteString(")\n")
+		repeat = 0
+	}
+
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, " \t")
+		if line == "" {
+			continue
+		}
+		if line == prev {
+			repeat++
+			continue
+		}
+		flush()
+		prev = line
+		repeat = 1
+	}
+	flush()
 }

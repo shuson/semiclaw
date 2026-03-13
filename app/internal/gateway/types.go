@@ -11,12 +11,24 @@ type ToolPermission struct {
 	RequireUserApproval bool
 }
 
+type RuntimeMetadata struct {
+	OS       string
+	Arch     string
+	Shell    string
+	Provider string
+	Model    string
+	Agent    string
+}
+
 type SessionState struct {
 	SessionID     string
 	AgentName     string
 	SystemPrompt  string
 	History       []ChatMessage
 	MemoryContext string
+	SkillsPrompt  string
+	UserTimezone  string
+	Runtime       RuntimeMetadata
 	ToolPolicy    map[string]ToolPermission
 }
 

@@ -45,15 +45,27 @@ func New(
 }
 
 type Request struct {
-	OwnerScopedID string
-	AgentName     string
-	SystemPrompt  string
-	Event         Event
-	MaxSteps      int
+	OwnerScopedID     string
+	AgentName         string
+	SystemPrompt      string
+	Event             Event
+	OriginalUserInput string
+	MaxSteps          int
+	SkillsPrompt      string
+	UserTimezone      string
+	Runtime           RuntimeMetadata
 }
 
 func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) {
-	session, err := g.sessions.BuildSession(ctx, req.OwnerScopedID, req.AgentName, req.SystemPrompt)
+	session, err := g.sessions.BuildSession(
+		ctx,
+		req.OwnerScopedID,
+		req.AgentName,
+		req.SystemPrompt,
+		req.SkillsPrompt,
+		req.UserTimezone,
+		req.Runtime,
+	)
 	if err != nil {
 		return Result{}, err
 	}
@@ -78,7 +90,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 			if finalText == "" {
 				finalText = "I could not produce a final response."
 			}
-			if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, finalText); saveErr != nil {
+			if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.userMessageForStorage(), finalText); saveErr != nil {
 				return Result{}, saveErr
 			}
 			return Result{Response: finalText, Actions: actions, FeedbackLoop: feedback}, nil
@@ -91,7 +103,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 				if strings.TrimSpace(rawOutput) != "" {
 					fallback = fallback + "\n\nRaw model output:\n" + strings.TrimSpace(rawOutput)
 				}
-				if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, fallback); saveErr != nil {
+				if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.userMessageForStorage(), fallback); saveErr != nil {
 					return Result{}, saveErr
 				}
 				return Result{Response: fallback, Actions: actions, FeedbackLoop: feedback}, nil
@@ -112,7 +124,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 			if fallback == "" {
 				fallback = "I could not produce a valid response format."
 			}
-			if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, fallback); saveErr != nil {
+			if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.userMessageForStorage(), fallback); saveErr != nil {
 				return Result{}, saveErr
 			}
 			return Result{Response: fallback, Actions: actions, FeedbackLoop: feedback}, nil
@@ -120,10 +132,17 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 	}
 
 	final := "I reached the maximum reasoning steps before producing a final response.\nWould you like me to continue? (reply with: continue)"
-	if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.Event.Message, final); saveErr != nil {
+	if saveErr := g.saveConversation(ctx, req.OwnerScopedID, req.userMessageForStorage(), final); saveErr != nil {
 		return Result{}, saveErr
 	}
 	return Result{Response: final, Actions: actions, FeedbackLoop: feedback}, nil
+}
+
+func (r Request) userMessageForStorage() string {
+	if strings.TrimSpace(r.OriginalUserInput) != "" {
+		return r.OriginalUserInput
+	}
+	return r.Event.Message
 }
 
 func (g *Gateway) executeToolCall(ctx context.Context, session SessionState, call ToolCall) (ToolResult, error) {

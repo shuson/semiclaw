@@ -29,6 +29,7 @@ import (
 	"semiclaw/app/internal/gateway"
 	"semiclaw/app/internal/hostcmd"
 	"semiclaw/app/internal/memorymd"
+	"semiclaw/app/internal/promptbuilder"
 	"semiclaw/app/internal/provider"
 	"semiclaw/app/internal/pythoncmd"
 	"semiclaw/app/internal/webcrawl"
@@ -67,7 +68,7 @@ type Runner struct {
 	stdout    io.Writer
 	stderr    io.Writer
 
-	allowAllHostShellPermissions bool
+	allowAllHostShellPermissions map[string]bool
 }
 
 type cliTheme struct {
@@ -111,19 +112,20 @@ func NewRunner(
 	stderr io.Writer,
 ) *Runner {
 	return &Runner{
-		cfg:       cfg,
-		store:     store,
-		secretBox: secretBox,
-		agent:     agent,
-		crawler:   crawler,
-		hostCmd:   hostCmd,
-		pythonCmd: pythonCmd,
-		fileCmd:   fileCmd,
-		memory:    memory,
-		version:   normalizeVersion(version),
-		stdin:     stdin,
-		stdout:    stdout,
-		stderr:    stderr,
+		cfg:                          cfg,
+		store:                        store,
+		secretBox:                    secretBox,
+		agent:                        agent,
+		crawler:                      crawler,
+		hostCmd:                      hostCmd,
+		pythonCmd:                    pythonCmd,
+		fileCmd:                      fileCmd,
+		memory:                       memory,
+		version:                      normalizeVersion(version),
+		stdin:                        stdin,
+		stdout:                       stdout,
+		stderr:                       stderr,
+		allowAllHostShellPermissions: make(map[string]bool),
 	}
 }
 
@@ -142,7 +144,7 @@ func (t cliTheme) title(text string) string   { return t.paint("1;38;5;45", text
 func (t cliTheme) section(text string) string { return t.paint("1;38;5;51", text) }
 func (t cliTheme) key(text string) string     { return t.paint("38;5;250", text) }
 func (t cliTheme) value(text string) string   { return t.paint("1;38;5;229", text) }
-func (t cliTheme) command(text string) string { return t.paint("38;5;122", text) }
+func (t cliTheme) command(text string) string { return t.paint("1;4", text) }
 func (t cliTheme) success(text string) string { return t.paint("1;38;5;84", "✔ "+text) }
 func (t cliTheme) info(text string) string    { return t.paint("1;38;5;117", "ℹ "+text) }
 func (t cliTheme) warn(text string) string    { return t.paint("1;38;5;214", "⚠ "+text) }
@@ -354,7 +356,7 @@ func (r *Runner) runSetup(ctx context.Context, args []string) error {
 		fmt.Fprintln(r.stdout, out.kv("🤖 Current Agent", defaultAgentName))
 		fmt.Fprintln(r.stdout, out.kv("🔌 Provider", setupProviderKind))
 		fmt.Fprintln(r.stdout, out.kv("🧠 Model", setupModel))
-		return nil
+		return r.enterChatAfterSetup(ctx, out)
 	}
 
 	owner, err := r.store.GetOwner(ctx)
@@ -508,7 +510,17 @@ func (r *Runner) runSetup(ctx context.Context, args []string) error {
 	fmt.Fprintln(r.stdout, out.kv("🔌 Provider", setupProviderKind))
 	fmt.Fprintln(r.stdout, out.kv("🧠 Model", setupModel))
 	fmt.Fprintln(r.stdout, out.kv("🌐 Base URL", setupBaseURL))
-	return nil
+	return r.enterChatAfterSetup(ctx, out)
+}
+
+func (r *Runner) enterChatAfterSetup(ctx context.Context, out cliTheme) error {
+	stdinFile, ok := r.stdin.(*os.File)
+	if !ok || !isTerminalFile(stdinFile) || !isTerminalFile(r.stdout) {
+		return nil
+	}
+	fmt.Fprintln(r.stdout, "")
+	fmt.Fprintln(r.stdout, out.info("Entering chat mode..."))
+	return r.runChat(ctx, nil)
 }
 
 func (r *Runner) collectUserProfile(ctx context.Context) error {
@@ -694,11 +706,10 @@ func (r *Runner) runChat(ctx context.Context, args []string) error {
 
 	message := strings.TrimSpace(strings.Join(args, " "))
 	if message != "" {
-		if strings.EqualFold(message, ":clear") {
-			return r.clearCurrentChatHistory(ctx, owner, activeAgent)
-		}
-		if strings.EqualFold(message, ":history") {
-			return r.printCurrentInputHistory(ctx, owner, activeAgent, 10)
+		if handled, _, err := r.handleChatControlCommand(ctx, owner, activeAgent, message); err != nil {
+			return err
+		} else if handled {
+			return nil
 		}
 		response, handled, err := r.processChatTurn(ctx, owner, activeAgent, activeProviderKind, message)
 		if err != nil {
@@ -721,7 +732,7 @@ func (r *Runner) runInteractiveChat(
 ) error {
 	out := r.themeFor(r.stdout)
 	fmt.Fprintln(r.stdout, out.info("Interactive chat mode ("+activeAgent.Name+")"))
-	fmt.Fprintln(r.stdout, out.key("Type your message and press Enter. Type 'exit' or 'quit' to leave. Type ':clear' to clear this chat history. Type ':history' to list last 10 inputs. Type ':allow-shell-all' to auto-approve host shell commands."))
+	fmt.Fprintln(r.stdout, out.key("Type your message and press Enter. Type 'exit' or 'quit' to leave. Type ':session list|new|switch N|delete [N]' to manage sessions. Type ':clear' to clear the current session. Type ':history' to show the current session dialog. Type ':allow-shell-all' to auto-approve host shell commands only for the current session."))
 
 	type turnResult struct {
 		response string
@@ -738,7 +749,18 @@ func (r *Runner) runInteractiveChat(
 	}
 
 	for {
-		prompt := out.section(activeAgent.Name + "> ")
+		_, sessionID, sessionIDs, sessionErr := r.currentChatUserScope(ctx, owner, activeAgent)
+		if sessionErr != nil {
+			return sessionErr
+		}
+		sessionIndex := 1
+		for i, item := range sessionIDs {
+			if item == sessionID {
+				sessionIndex = i + 1
+				break
+			}
+		}
+		prompt := out.section(fmt.Sprintf("%s[%d]> ", activeAgent.Name, sessionIndex))
 		ev := r.readInteractiveInput(prompt, inputHistory)
 		if ev.err != nil {
 			return ev.err
@@ -761,15 +783,13 @@ func (r *Runner) runInteractiveChat(
 		case "exit", "quit", ":q":
 			fmt.Fprintln(r.stdout, out.info("Bye."))
 			return nil
-		case ":clear":
-			if err := r.clearCurrentChatHistory(ctx, owner, activeAgent); err != nil {
+		}
+		if handled, refreshHistory, err := r.handleChatControlCommand(ctx, owner, activeAgent, message); handled || err != nil {
+			if err != nil {
 				fmt.Fprintf(r.stderr, "chat error: %v\n", err)
 			}
-			inputHistory = nil
-			continue
-		case ":history":
-			if err := r.printInputHistoryFromSlice(inputHistory, 10); err != nil {
-				fmt.Fprintf(r.stderr, "chat error: %v\n", err)
+			if refreshHistory {
+				inputHistory, _ = r.collectUserInputHistory(ctx, owner, activeAgent, 200)
 			}
 			continue
 		}
@@ -980,11 +1000,91 @@ func isArrowUpSequence(input string) bool {
 	return trimmed == "\x1b[A" || trimmed == "[A"
 }
 
+func (r *Runner) getOrCreateActiveChatSession(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) (string, []string, error) {
+	if owner == nil || activeAgent == nil {
+		return "", nil, errors.New("chat context is required")
+	}
+
+	listKey := chatSessionListConfigKey(owner.OwnerID, activeAgent.Name)
+	sessionIDs := make([]string, 0, 4)
+	if raw, ok, err := r.store.GetConfig(ctx, listKey); err != nil {
+		return "", nil, err
+	} else if ok && strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &sessionIDs); err != nil {
+			return "", nil, fmt.Errorf("parse chat session list: %w", err)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(sessionIDs))
+	filtered := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			continue
+		}
+		if _, ok := seen[sessionID]; ok {
+			continue
+		}
+		seen[sessionID] = struct{}{}
+		filtered = append(filtered, sessionID)
+	}
+	sessionIDs = filtered
+	if len(sessionIDs) == 0 {
+		sessionIDs = []string{"s1"}
+	}
+
+	activeKey := chatSessionActiveConfigKey(owner.OwnerID, activeAgent.Name)
+	activeID, _, err := r.store.GetConfig(ctx, activeKey)
+	if err != nil {
+		return "", nil, err
+	}
+	activeID = strings.TrimSpace(activeID)
+	if activeID == "" {
+		activeID = sessionIDs[0]
+	}
+
+	found := false
+	for _, sessionID := range sessionIDs {
+		if sessionID == activeID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		activeID = sessionIDs[0]
+	}
+
+	encoded, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode chat session list: %w", err)
+	}
+	if err := r.store.UpsertConfig(ctx, listKey, string(encoded)); err != nil {
+		return "", nil, err
+	}
+	if err := r.store.UpsertConfig(ctx, activeKey, activeID); err != nil {
+		return "", nil, err
+	}
+
+	return activeID, sessionIDs, nil
+}
+
+func (r *Runner) currentChatUserScope(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) (string, string, []string, error) {
+	activeID, sessionIDs, err := r.getOrCreateActiveChatSession(ctx, owner, activeAgent)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return chatSessionScopedUserID(owner.OwnerID, activeAgent.Name, activeID), activeID, sessionIDs, nil
+}
+
 func (r *Runner) collectUserInputHistory(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, maxItems int) ([]string, error) {
 	if owner == nil || activeAgent == nil {
 		return nil, nil
 	}
-	history, err := r.store.GetRecentMessages(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), 500)
+	userScope, _, _, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return nil, err
+	}
+	history, err := r.store.GetRecentMessages(ctx, userScope, 500)
 	if err != nil {
 		return nil, err
 	}
@@ -1009,7 +1109,11 @@ func (r *Runner) clearCurrentChatHistory(ctx context.Context, owner *db.Owner, a
 	if owner == nil || activeAgent == nil {
 		return errors.New("chat context is required")
 	}
-	if err := r.store.DeleteMessagesByUserID(ctx, scopedUserID(owner.OwnerID, activeAgent.Name)); err != nil {
+	userScope, _, _, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	if err := r.store.DeleteMessagesByUserID(ctx, userScope); err != nil {
 		return err
 	}
 	out := r.themeFor(r.stdout)
@@ -1023,6 +1127,7 @@ func isHistoryControlInput(input string) bool {
 		trimmed == ":history" ||
 		trimmed == ":allow-shell-all" ||
 		trimmed == ":ask-shell-permission" ||
+		strings.HasPrefix(trimmed, ":session ") ||
 		isArrowUpSequence(trimmed)
 }
 
@@ -1127,12 +1232,222 @@ func renderInlineMarkdown(line string, out cliTheme) string {
 	return rendered
 }
 
+func (r *Runner) printCurrentChatHistory(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, limit int) error {
+	if owner == nil || activeAgent == nil {
+		return errors.New("chat context is required")
+	}
+	userScope, sessionID, sessionIDs, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	history, err := r.store.GetRecentMessages(ctx, userScope, limit)
+	if err != nil {
+		return err
+	}
+	out := r.themeFor(r.stdout)
+	if len(history) == 0 {
+		fmt.Fprintln(r.stdout, out.warn("No dialog history found for current session."))
+		return nil
+	}
+	sessionIndex := 1
+	for i, item := range sessionIDs {
+		if item == sessionID {
+			sessionIndex = i + 1
+			break
+		}
+	}
+	fmt.Fprintln(r.stdout, out.section("🕘 Session History"))
+	fmt.Fprintln(r.stdout, out.kv("🤖 Agent", activeAgent.Name))
+	fmt.Fprintln(r.stdout, out.kv("🧵 Session", fmt.Sprintf("%d (%s)", sessionIndex, sessionID)))
+	for _, msg := range history {
+		timeLabel := time.UnixMilli(msg.CreatedAt).Format(time.RFC3339)
+		fmt.Fprintf(r.stdout, "[%s] %s: %s\n", timeLabel, msg.Role, msg.Content)
+	}
+	return nil
+}
+
 func (r *Runner) printCurrentInputHistory(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, limit int) error {
 	items, err := r.collectUserInputHistory(ctx, owner, activeAgent, 200)
 	if err != nil {
 		return err
 	}
 	return r.printInputHistoryFromSlice(items, limit)
+}
+
+type chatSessionCommand struct {
+	action string
+	index  int
+}
+
+func parseChatSessionCommand(message string) (chatSessionCommand, bool) {
+	fields := strings.Fields(strings.TrimSpace(message))
+	if len(fields) < 2 || strings.ToLower(fields[0]) != ":session" {
+		return chatSessionCommand{}, false
+	}
+
+	cmd := chatSessionCommand{action: strings.ToLower(fields[1])}
+	switch cmd.action {
+	case "list", "new":
+		return cmd, true
+	case "switch", "delete":
+		if len(fields) >= 3 {
+			value, err := strconv.Atoi(fields[2])
+			if err == nil {
+				cmd.index = value
+			}
+		}
+		return cmd, true
+	default:
+		return chatSessionCommand{}, false
+	}
+}
+
+func (r *Runner) printChatSessionList(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) error {
+	activeID, sessionIDs, err := r.getOrCreateActiveChatSession(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	out := r.themeFor(r.stdout)
+	fmt.Fprintln(r.stdout, out.section("🧵 Sessions"))
+	for i, sessionID := range sessionIDs {
+		label := fmt.Sprintf("%d.", i+1)
+		if sessionID == activeID {
+			label = label + " *"
+		}
+		fmt.Fprintf(r.stdout, "%s %s\n", out.key(label), sessionID)
+	}
+	return nil
+}
+
+func (r *Runner) createChatSession(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) error {
+	_, sessionIDs, err := r.getOrCreateActiveChatSession(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	newID := nextChatSessionID(sessionIDs)
+	sessionIDs = append(sessionIDs, newID)
+	encoded, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return fmt.Errorf("encode chat session list: %w", err)
+	}
+	if err := r.store.UpsertConfig(ctx, chatSessionListConfigKey(owner.OwnerID, activeAgent.Name), string(encoded)); err != nil {
+		return err
+	}
+	if err := r.store.UpsertConfig(ctx, chatSessionActiveConfigKey(owner.OwnerID, activeAgent.Name), newID); err != nil {
+		return err
+	}
+	out := r.themeFor(r.stdout)
+	fmt.Fprintln(r.stdout, out.success(fmt.Sprintf("Created and switched to session %d (%s).", len(sessionIDs), newID)))
+	return nil
+}
+
+func (r *Runner) switchChatSession(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, index int) error {
+	_, sessionIDs, err := r.getOrCreateActiveChatSession(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	if index <= 0 || index > len(sessionIDs) {
+		return fmt.Errorf("session index must be between 1 and %d", len(sessionIDs))
+	}
+	targetID := sessionIDs[index-1]
+	if err := r.store.UpsertConfig(ctx, chatSessionActiveConfigKey(owner.OwnerID, activeAgent.Name), targetID); err != nil {
+		return err
+	}
+	out := r.themeFor(r.stdout)
+	fmt.Fprintln(r.stdout, out.success(fmt.Sprintf("Switched to session %d (%s).", index, targetID)))
+	return nil
+}
+
+func (r *Runner) deleteChatSession(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, index int) error {
+	activeID, sessionIDs, err := r.getOrCreateActiveChatSession(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+	if index == 0 {
+		for i, sessionID := range sessionIDs {
+			if sessionID == activeID {
+				index = i + 1
+				break
+			}
+		}
+	}
+	if index <= 0 || index > len(sessionIDs) {
+		return fmt.Errorf("session index must be between 1 and %d", len(sessionIDs))
+	}
+
+	targetID := sessionIDs[index-1]
+	if err := r.store.DeleteMessagesByUserID(ctx, chatSessionScopedUserID(owner.OwnerID, activeAgent.Name, targetID)); err != nil {
+		return err
+	}
+
+	sessionIDs = append(sessionIDs[:index-1], sessionIDs[index:]...)
+	if len(sessionIDs) == 0 {
+		sessionIDs = []string{nextChatSessionID([]string{targetID})}
+	}
+
+	nextActiveID := activeID
+	found := false
+	for _, sessionID := range sessionIDs {
+		if sessionID == nextActiveID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		if index-1 < len(sessionIDs) {
+			nextActiveID = sessionIDs[index-1]
+		} else {
+			nextActiveID = sessionIDs[len(sessionIDs)-1]
+		}
+	}
+
+	encoded, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return fmt.Errorf("encode chat session list: %w", err)
+	}
+	if err := r.store.UpsertConfig(ctx, chatSessionListConfigKey(owner.OwnerID, activeAgent.Name), string(encoded)); err != nil {
+		return err
+	}
+	if err := r.store.UpsertConfig(ctx, chatSessionActiveConfigKey(owner.OwnerID, activeAgent.Name), nextActiveID); err != nil {
+		return err
+	}
+
+	out := r.themeFor(r.stdout)
+	fmt.Fprintln(r.stdout, out.success(fmt.Sprintf("Deleted session %d (%s).", index, targetID)))
+	for i, sessionID := range sessionIDs {
+		if sessionID == nextActiveID {
+			fmt.Fprintln(r.stdout, out.info(fmt.Sprintf("Active session is now %d (%s).", i+1, nextActiveID)))
+			break
+		}
+	}
+	return nil
+}
+
+func (r *Runner) handleChatControlCommand(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, message string) (bool, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(message)) {
+	case ":clear":
+		return true, true, r.clearCurrentChatHistory(ctx, owner, activeAgent)
+	case ":history":
+		return true, false, r.printCurrentChatHistory(ctx, owner, activeAgent, 1000)
+	}
+
+	if cmd, ok := parseChatSessionCommand(message); ok {
+		switch cmd.action {
+		case "list":
+			return true, false, r.printChatSessionList(ctx, owner, activeAgent)
+		case "new":
+			return true, true, r.createChatSession(ctx, owner, activeAgent)
+		case "switch":
+			return true, true, r.switchChatSession(ctx, owner, activeAgent, cmd.index)
+		case "delete":
+			return true, true, r.deleteChatSession(ctx, owner, activeAgent, cmd.index)
+		}
+	}
+
+	if handled := r.handleHostShellPermissionIntent(ctx, owner, activeAgent, message); handled {
+		return true, false, nil
+	}
+	return false, false, nil
 }
 
 func (r *Runner) printInputHistoryFromSlice(items []string, limit int) error {
@@ -1168,21 +1483,22 @@ func (r *Runner) processChatTurn(
 		return "", false, errors.New("message is required")
 	}
 
+	userScope, _, _, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return "", false, err
+	}
+
 	continueRequested := isContinueChatRequest(message)
 	awaitingContinuation := false
 	if continueRequested {
-		awaitingContinuation = r.wasAwaitingContinuationPrompt(ctx, owner, activeAgent)
+		awaitingContinuation = r.wasAwaitingContinuationPrompt(ctx, userScope)
 	}
 
-	if handled := r.handleHostShellPermissionIntent(message); handled {
-		_ = r.store.SaveMessage(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), "user", message)
-		return "", true, nil
-	}
 	if r.memory != nil {
 		_ = r.memory.AppendDaily(activeAgent.Name, "chat.user", fmt.Sprintf("%s: %s", activeAgent.Name, message))
 	}
 
-	if taskResponse, taskHandled, taskErr := r.maybeExecuteTasksFromMarkdown(ctx, activeAgent, activeProviderKind, message); taskErr != nil || taskHandled {
+	if taskResponse, taskHandled, taskErr := r.maybeExecuteTasksFromMarkdown(ctx, activeAgent, activeProviderKind, userScope, message); taskErr != nil || taskHandled {
 		if taskErr != nil {
 			return "", false, taskErr
 		}
@@ -1195,7 +1511,7 @@ func (r *Runner) processChatTurn(
 	if handled, err := r.handleMemoryIntents(activeAgent.Name, message); err != nil {
 		return "", false, err
 	} else if handled {
-		_ = r.store.SaveMessage(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), "user", message)
+		_ = r.store.SaveMessage(ctx, userScope, "user", message)
 		return "", true, nil
 	}
 
@@ -1210,7 +1526,7 @@ func (r *Runner) processChatTurn(
 			return errors.New("failed to initialize provider client")
 		}
 
-		state := r.newChatTurnState(owner, activeAgent, message)
+		state := r.newChatTurnState(owner, activeAgent, activeProviderKind, userScope, message)
 		r.applyLongTermMemoryContext(activeAgent, message, &state)
 		r.resolveWebIntentFromMemory(message, &state)
 		if continueRequested && awaitingContinuation {
@@ -1247,7 +1563,7 @@ func (r *Runner) processChatTurn(
 						return true, nil
 					}
 					setPhase("Awaiting permission")
-					return r.confirmHostCommand(command)
+					return r.confirmHostCommand(state.userScope, command)
 				case "python", "file":
 					setPhase("Awaiting permission")
 					return r.confirmToolApproval(tool, gateway.EncodeToolCall(call))
@@ -1263,11 +1579,22 @@ func (r *Runner) processChatTurn(
 			requestMaxSteps = continueGatewayReasoningSteps
 		}
 		result, runErr := gatewayService.HandleEvent(ctx, gateway.Request{
-			OwnerScopedID: state.userScope,
-			AgentName:     activeAgent.Name,
-			SystemPrompt:  state.systemPrompt,
-			Event:         gateway.Event{Message: state.effectiveMessage},
-			MaxSteps:      requestMaxSteps,
+			OwnerScopedID:     state.userScope,
+			AgentName:         activeAgent.Name,
+			SystemPrompt:      state.systemPrompt,
+			Event:             gateway.Event{Message: state.effectiveMessage},
+			OriginalUserInput: message,
+			MaxSteps:          requestMaxSteps,
+			SkillsPrompt:      r.buildSkillsPrompt(),
+			UserTimezone:      r.currentUserTimezone(),
+			Runtime: gateway.RuntimeMetadata{
+				OS:       runtime.GOOS,
+				Arch:     runtime.GOARCH,
+				Shell:    strings.TrimSpace(os.Getenv("SHELL")),
+				Provider: activeProviderKind,
+				Model:    strings.TrimSpace(activeAgent.Model),
+				Agent:    strings.TrimSpace(activeAgent.Name),
+			},
 		})
 		if runErr != nil {
 			return runErr
@@ -1295,12 +1622,25 @@ func (r *Runner) processChatTurn(
 	return response, false, nil
 }
 
-func (r *Runner) newChatTurnState(owner *db.Owner, activeAgent *db.AgentRecord, message string) chatTurnState {
+func (r *Runner) newChatTurnState(owner *db.Owner, activeAgent *db.AgentRecord, activeProviderKind string, userScope string, message string) chatTurnState {
 	webTargetURL, useWebAgent := detectWebCrawlIntent(message)
 	return chatTurnState{
-		systemPrompt:     composeSuperAdminSystemPrompt(activeAgent.SystemPrompt),
+		systemPrompt: composeSuperAdminSystemPrompt(
+			activeAgent.SystemPrompt,
+			promptbuilder.RuntimeInfo{
+				OS:       runtime.GOOS,
+				Arch:     runtime.GOARCH,
+				Shell:    strings.TrimSpace(os.Getenv("SHELL")),
+				Provider: strings.TrimSpace(activeProviderKind),
+				Model:    strings.TrimSpace(activeAgent.Model),
+				Agent:    strings.TrimSpace(activeAgent.Name),
+			},
+			r.currentUserTimezone(),
+			r.buildSkillsPrompt(),
+			message,
+		),
 		effectiveMessage: message,
-		userScope:        scopedUserID(owner.OwnerID, activeAgent.Name),
+		userScope:        userScope,
 		webTargetURL:     webTargetURL,
 		useWebAgent:      useWebAgent,
 	}
@@ -1368,7 +1708,7 @@ func (r *Runner) runHostCommandPhase(
 	if requiresHostCommandApproval(intentCommand) {
 		setPhase("Awaiting permission")
 		var approveErr error
-		approved, approveErr = r.confirmHostCommand(intentCommand)
+		approved, approveErr = r.confirmHostCommand(state.userScope, intentCommand)
 		if approveErr != nil {
 			return hostCommandOutcome{}, fmt.Errorf("host command permission prompt failed: %w", approveErr)
 		}
@@ -1426,7 +1766,20 @@ func (r *Runner) runWebCrawlPhase(
 		return fmt.Errorf("web agent crawl failed: %w", crawlErr)
 	}
 
-	state.systemPrompt = composeSuperAdminSystemPrompt(builtinWebAgentPrompt())
+	state.systemPrompt = composeSuperAdminSystemPrompt(
+		builtinWebAgentPrompt(),
+		promptbuilder.RuntimeInfo{
+			OS:       runtime.GOOS,
+			Arch:     runtime.GOARCH,
+			Shell:    strings.TrimSpace(os.Getenv("SHELL")),
+			Provider: "web",
+			Model:    "builtin:web",
+			Agent:    "builtin:web",
+		},
+		r.currentUserTimezone(),
+		r.buildSkillsPrompt(),
+		message,
+	)
 	state.effectiveMessage = composeWebAgentMessage(message, page)
 	state.userScope = scopedUserID(owner.OwnerID, "builtin:web")
 	return nil
@@ -1443,6 +1796,51 @@ func (r *Runner) handleMemoryIntents(agentName string, message string) (bool, er
 		_ = r.memory.AppendDaily(agentName, "memory", "remembered: "+note)
 		out := r.themeFor(r.stdout)
 		fmt.Fprintln(r.stdout, out.success("Noted. I saved that to long-term memory."))
+		return true, nil
+	}
+	if memoryQuery, ok := detectMemoryQueryIntent(message); ok {
+		entries, err := r.memory.ListLongTermEntries(agentName, 5)
+		if err != nil {
+			return true, err
+		}
+		out := r.themeFor(r.stdout)
+		if len(entries) == 0 {
+			fmt.Fprintln(r.stdout, out.info("No long-term memory entries found."))
+			return true, nil
+		}
+		fmt.Fprintln(r.stdout, out.section("🧠 Long-Term Memory"))
+		for i, entry := range entries {
+			fmt.Fprintf(r.stdout, "%s %s\n", out.key(fmt.Sprintf("%d.", i+1)), entry)
+		}
+		_ = memoryQuery
+		return true, nil
+	}
+	if forgetTarget, forgetLatest, ok := detectForgetIntent(message); ok {
+		out := r.themeFor(r.stdout)
+		if forgetLatest {
+			removedEntry, removed, err := r.memory.RemoveLatestLongTerm(agentName)
+			if err != nil {
+				return true, err
+			}
+			if !removed {
+				fmt.Fprintln(r.stdout, out.info("No long-term memory entries found."))
+				return true, nil
+			}
+			_ = r.memory.AppendDaily(agentName, "memory", "removed latest: "+removedEntry)
+			fmt.Fprintln(r.stdout, out.success("Removed the latest long-term memory entry."))
+			return true, nil
+		}
+
+		removed, err := r.memory.RemoveLongTermMatching(agentName, forgetTarget)
+		if err != nil {
+			return true, err
+		}
+		if removed > 0 {
+			_ = r.memory.AppendDaily(agentName, "memory", fmt.Sprintf("removed %d item(s): %s", removed, forgetTarget))
+			fmt.Fprintln(r.stdout, out.success(fmt.Sprintf("Removed %d memory entrie(s) matching: %s", removed, forgetTarget)))
+		} else {
+			fmt.Fprintln(r.stdout, out.info("No matching long-term memory entries found."))
+		}
 		return true, nil
 	}
 	if job, ok := parseAutomationIntent(message); ok {
@@ -1481,24 +1879,21 @@ func (r *Runner) runHistory(ctx context.Context, args []string) error {
 		return err
 	}
 
-	history, err := r.store.GetRecentMessages(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), *limit)
+	userScope, _, _, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return err
+	}
+
+	history, err := r.store.GetRecentMessages(ctx, userScope, *limit)
 	if err != nil {
 		return err
 	}
 	if len(history) == 0 {
 		out := r.themeFor(r.stdout)
-		fmt.Fprintln(r.stdout, out.warn(fmt.Sprintf("No messages found for agent %q.", activeAgent.Name)))
+		fmt.Fprintln(r.stdout, out.warn(fmt.Sprintf("No messages found for agent %q in the current session.", activeAgent.Name)))
 		return nil
 	}
-
-	out := r.themeFor(r.stdout)
-	fmt.Fprintln(r.stdout, out.section("🕘 Chat History"))
-	fmt.Fprintln(r.stdout, out.kv("🤖 Agent", activeAgent.Name))
-	for _, msg := range history {
-		timeLabel := time.UnixMilli(msg.CreatedAt).Format(time.RFC3339)
-		fmt.Fprintf(r.stdout, "[%s] %s: %s\n", timeLabel, msg.Role, msg.Content)
-	}
-	return nil
+	return r.printCurrentChatHistory(ctx, owner, activeAgent, *limit)
 }
 
 func (r *Runner) buildProviderClient(providerKind string, activeAgent *db.AgentRecord) provider.Provider {
@@ -2002,7 +2397,13 @@ func (r *Runner) runAgentDelete(ctx context.Context, owner *db.Owner, args []str
 		}
 	}
 
-	if err := r.store.DeleteMessagesByUserID(ctx, scopedUserID(owner.OwnerID, name)); err != nil {
+	if err := r.store.DeleteMessagesByUserIDPrefix(ctx, scopedUserID(owner.OwnerID, name)); err != nil {
+		return err
+	}
+	if err := r.store.DeleteConfig(ctx, chatSessionListConfigKey(owner.OwnerID, name)); err != nil {
+		return err
+	}
+	if err := r.store.DeleteConfig(ctx, chatSessionActiveConfigKey(owner.OwnerID, name)); err != nil {
 		return err
 	}
 	if err := r.store.DeleteSecret(ctx, agentSecretKey(name)); err != nil {
@@ -2214,6 +2615,40 @@ func agentProviderKindConfigKey(name string) string {
 
 func scopedUserID(ownerID string, agentName string) string {
 	return ownerID + "::agent:" + agentName
+}
+
+func chatSessionListConfigKey(ownerID string, agentName string) string {
+	return "chat.sessions." + scopedUserID(ownerID, agentName)
+}
+
+func chatSessionActiveConfigKey(ownerID string, agentName string) string {
+	return "chat.session.active." + scopedUserID(ownerID, agentName)
+}
+
+func chatSessionScopedUserID(ownerID string, agentName string, sessionID string) string {
+	return scopedUserID(ownerID, agentName) + "::session:" + sessionID
+}
+
+func parseChatSessionOrdinal(sessionID string) int {
+	sessionID = strings.TrimSpace(strings.ToLower(sessionID))
+	if !strings.HasPrefix(sessionID, "s") {
+		return 0
+	}
+	value, err := strconv.Atoi(strings.TrimPrefix(sessionID, "s"))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func nextChatSessionID(sessionIDs []string) string {
+	maxOrdinal := 0
+	for _, sessionID := range sessionIDs {
+		if ordinal := parseChatSessionOrdinal(sessionID); ordinal > maxOrdinal {
+			maxOrdinal = ordinal
+		}
+	}
+	return fmt.Sprintf("s%d", maxOrdinal+1)
 }
 
 func detectWebCrawlIntent(message string) (string, bool) {
@@ -2475,6 +2910,20 @@ func parseHostShellPermissionIntent(message string) (allowAll bool, handled bool
 	return false, false
 }
 
+func (r *Runner) currentUserTimezone() string {
+	return strings.TrimSpace(time.Now().Location().String())
+}
+
+func (r *Runner) buildSkillsPrompt() string {
+	if inline := strings.TrimSpace(os.Getenv("SEMICLAW_SKILLS_PROMPT")); inline != "" {
+		return inline
+	}
+	if _, err := os.Stat("AGENTS.md"); err == nil {
+		return "If AGENTS.md defines skill routing or constraints, follow them before responding."
+	}
+	return ""
+}
+
 func isContinueChatRequest(message string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(message))
 	normalized = strings.Join(strings.Fields(normalized), " ")
@@ -2486,11 +2935,11 @@ func isContinueChatRequest(message string) bool {
 	}
 }
 
-func (r *Runner) wasAwaitingContinuationPrompt(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord) bool {
-	if r.store == nil || owner == nil || activeAgent == nil {
+func (r *Runner) wasAwaitingContinuationPrompt(ctx context.Context, userScope string) bool {
+	if r.store == nil || strings.TrimSpace(userScope) == "" {
 		return false
 	}
-	history, err := r.store.GetRecentMessages(ctx, scopedUserID(owner.OwnerID, activeAgent.Name), 6)
+	history, err := r.store.GetRecentMessages(ctx, userScope, 6)
 	if err != nil {
 		return false
 	}
@@ -2503,13 +2952,17 @@ func (r *Runner) wasAwaitingContinuationPrompt(ctx context.Context, owner *db.Ow
 	return false
 }
 
-func (r *Runner) handleHostShellPermissionIntent(message string) bool {
+func (r *Runner) handleHostShellPermissionIntent(ctx context.Context, owner *db.Owner, activeAgent *db.AgentRecord, message string) bool {
 	allowAll, handled := parseHostShellPermissionIntent(message)
 	if !handled {
 		return false
 	}
 
-	r.allowAllHostShellPermissions = allowAll
+	userScope, _, _, err := r.currentChatUserScope(ctx, owner, activeAgent)
+	if err != nil {
+		return false
+	}
+	r.allowAllHostShellPermissions[userScope] = allowAll
 	out := r.themeFor(r.stdout)
 	if allowAll {
 		fmt.Fprintln(r.stdout, out.success("Host shell permission mode updated: auto-approve all commands for this chat session."))
@@ -2739,7 +3192,13 @@ func builtinWebAgentPrompt() string {
 	return "You are Semiclaw Web Agent, specialized in webpage extraction and grounded answers.\nUse only the provided webpage content and links as evidence.\nNever ask the user to visit URLs when enough content is already provided.\nIf user asks for latest news, return a numbered list with title + short summary + source URL for each item.\nBe concise and include source URLs when making claims."
 }
 
-func composeSuperAdminSystemPrompt(basePrompt string) string {
+func composeSuperAdminSystemPrompt(
+	basePrompt string,
+	runtimeInfo promptbuilder.RuntimeInfo,
+	timezone string,
+	skillsPrompt string,
+	userMessage string,
+) string {
 	basePrompt = strings.TrimSpace(basePrompt)
 	if basePrompt == "" {
 		basePrompt = agent.DefaultSystemPrompt
@@ -2753,7 +3212,57 @@ func composeSuperAdminSystemPrompt(basePrompt string) string {
 - Respect safety: never claim a command/web action ran if it did not run; if denied or unavailable, clearly state that and continue with best effort.
 - Keep outputs actionable and concise; include evidence/source context when provided by tools.`
 
-	return basePrompt + "\n\n" + superAdmin
+	if domainContext := semiclawDomainContextForMessage(userMessage); domainContext != "" {
+		basePrompt += "\n\n" + domainContext
+	}
+
+	return promptbuilder.Build(promptbuilder.BuildParams{
+		BasePrompt: basePrompt + "\n\n" + superAdmin,
+		Mode:       promptbuilder.PromptModeFull,
+		AvailableTools: []string{
+			"shell", "browser", "python", "file",
+		},
+		MemoryEnabled: true,
+		SkillsPrompt:  strings.TrimSpace(skillsPrompt),
+		Timezone:      strings.TrimSpace(timezone),
+		Runtime:       runtimeInfo,
+	})
+}
+
+func semiclawDomainContextForMessage(message string) string {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return ""
+	}
+
+	keywords := []string{
+		"semiclaw",
+		"memory",
+		"memory.md",
+		"cron",
+		"tool",
+		"skill",
+		"safety",
+	}
+	matched := false
+	for _, keyword := range keywords {
+		if strings.Contains(message, keyword) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return ""
+	}
+
+	return `Semiclaw Domain Reference:
+- When the user mentions Semiclaw-specific terms, interpret them using Semiclaw runtime meaning first unless the user clearly means a generic concept instead.
+- "MEMORY" or "MEMORY.md" refers to Semiclaw long-term memory stored as markdown per agent, plus daily memory logs.
+- "CRON" refers to Semiclaw automation scheduling and automation-run tracking, not generic advice only.
+- "TOOL" refers to Semiclaw structured tool calls such as shell, browser, python, and file, each with policy and approval rules.
+- "SKILL" refers to AGENTS.md-guided or injected skill-routing instructions that can change how the assistant should answer or act.
+- "SAFETY" refers to Semiclaw execution constraints: permission gates, truthful tool-status reporting, and non-destructive behavior unless explicitly approved.
+- If the user asks how Semiclaw works, answer from the Semiclaw runtime context in this prompt instead of inventing generic platform behavior.`
 }
 
 func composeWebAgentMessage(userMessage string, page *webcrawl.Page) string {
@@ -2825,6 +3334,99 @@ func detectRememberIntent(message string) (string, bool) {
 			if value != "" {
 				return value, true
 			}
+		}
+	}
+	return "", false
+}
+
+func detectForgetIntent(message string) (string, bool, bool) {
+	trimmed := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmed)
+	if lower == "" {
+		return "", false, false
+	}
+
+	pronounPhrases := []string{
+		"forget it",
+		"remove it",
+		"delete it",
+		"revoke it",
+		"forget that",
+		"remove that",
+		"delete that",
+		"revoke that",
+		"forget the memory",
+		"remove the memory",
+		"delete the memory",
+		"revoke the memory",
+	}
+	for _, phrase := range pronounPhrases {
+		if strings.Contains(lower, phrase) {
+			return "", true, true
+		}
+	}
+
+	prefixes := []string{
+		"forget:",
+		"forget ",
+		"remove memory:",
+		"remove memory ",
+		"delete memory:",
+		"delete memory ",
+		"revoke memory:",
+		"revoke memory ",
+		"remove from memory:",
+		"remove from memory ",
+		"delete from memory:",
+		"delete from memory ",
+		"revoke from memory:",
+		"revoke from memory ",
+		"revoke:",
+		"revoke ",
+	}
+	for _, verb := range []string{"remove ", "delete ", "forget ", "revoke "} {
+		if strings.HasPrefix(lower, verb) && strings.HasSuffix(lower, " memory") {
+			value := strings.TrimSpace(trimmed[len(verb) : len(trimmed)-len(" memory")])
+			if value != "" {
+				return value, false, true
+			}
+		}
+	}
+
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lower, prefix) {
+			value := strings.TrimSpace(trimmed[len(prefix):])
+			if value != "" {
+				return value, false, true
+			}
+		}
+	}
+	return "", false, false
+}
+
+func detectMemoryQueryIntent(message string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	if normalized == "" {
+		return "", false
+	}
+	normalized = strings.Join(strings.Fields(normalized), " ")
+
+	phrases := []string{
+		"any memory",
+		"any momory",
+		"what do you remember",
+		"show memory",
+		"show memories",
+		"list memory",
+		"list memories",
+		"my memory",
+		"what's in memory",
+		"whats in memory",
+		"memory?",
+	}
+	for _, phrase := range phrases {
+		if normalized == phrase || strings.Contains(normalized, phrase) {
+			return normalized, true
 		}
 	}
 	return "", false
@@ -3056,7 +3658,7 @@ func (r *Runner) promptYesNo(label string, defaultYes bool) (bool, error) {
 	}
 }
 
-func (r *Runner) confirmHostCommand(command string) (bool, error) {
+func (r *Runner) confirmHostCommand(userScope string, command string) (bool, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, nil
@@ -3064,8 +3666,8 @@ func (r *Runner) confirmHostCommand(command string) (bool, error) {
 
 	out := r.themeFor(r.stdout)
 	fmt.Fprintln(r.stdout, out.warn("Host command execution requested"))
-	fmt.Fprintln(r.stdout, out.kv("💻 Command", command))
-	if r.allowAllHostShellPermissions {
+	fmt.Fprintf(r.stdout, "%s %s\n", out.key("💻 Command:"), out.command(command))
+	if r.allowAllHostShellPermissions[strings.TrimSpace(userScope)] {
 		fmt.Fprintln(r.stdout, out.info("Auto-approved by user setting. Executing command."))
 		return true, nil
 	}

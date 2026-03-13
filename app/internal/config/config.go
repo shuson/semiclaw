@@ -17,15 +17,17 @@ const (
 )
 
 type Config struct {
-	DataDir           string
-	DBPath            string
-	EncryptionKeyPath string
-	SessionTokenPath  string
-	OllamaBaseURL     string
-	DefaultModel      string
-	OllamaTimeout     time.Duration
-	OwnerID           string
-	MigrationsDir     string
+	DataDir              string
+	DBPath               string
+	EncryptionKeyPath    string
+	SessionTokenPath     string
+	OllamaBaseURL        string
+	DefaultModel         string
+	OllamaTimeout        time.Duration
+	OwnerID              string
+	MigrationsDir        string
+	PromptBuilderEnabled bool
+	PromptDefaultMode    string
 }
 
 func Load() (Config, error) {
@@ -48,15 +50,17 @@ func Load() (Config, error) {
 	})
 
 	cfg := Config{
-		DataDir:           paths.DataDir,
-		DBPath:            paths.DBPath,
-		EncryptionKeyPath: paths.EncryptionKeyPath,
-		SessionTokenPath:  paths.SessionTokenPath,
-		OllamaBaseURL:     getEnv("OLLAMA_BASE_URL", defaultOllamaBaseURL),
-		DefaultModel:      getEnv("OLLAMA_MODEL", defaultModel),
-		OllamaTimeout:     getEnvDurationSeconds("OLLAMA_TIMEOUT_SECONDS", defaultOllamaTimeout),
-		OwnerID:           "cli:owner",
-		MigrationsDir:     migrationsDir,
+		DataDir:              paths.DataDir,
+		DBPath:               paths.DBPath,
+		EncryptionKeyPath:    paths.EncryptionKeyPath,
+		SessionTokenPath:     paths.SessionTokenPath,
+		OllamaBaseURL:        getEnv("OLLAMA_BASE_URL", defaultOllamaBaseURL),
+		DefaultModel:         getEnv("OLLAMA_MODEL", defaultModel),
+		OllamaTimeout:        getEnvDurationSeconds("OLLAMA_TIMEOUT_SECONDS", defaultOllamaTimeout),
+		OwnerID:              "cli:owner",
+		MigrationsDir:        migrationsDir,
+		PromptBuilderEnabled: getEnvBool("SEMICLAW_PROMPT_BUILDER_ENABLED", false),
+		PromptDefaultMode:    normalizePromptMode(getEnv("SEMICLAW_PROMPT_MODE", "full")),
 	}
 
 	if err := ensureDir(paths.DataSubdir, 0o700); err != nil {
@@ -119,6 +123,32 @@ func getEnvDurationSeconds(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	val := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if val == "" {
+		return fallback
+	}
+	switch val {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func normalizePromptMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "minimal":
+		return "minimal"
+	case "none":
+		return "none"
+	default:
+		return "full"
+	}
 }
 
 func resolvePath(explicit string, candidates []string) string {

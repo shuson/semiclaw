@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
+	"time"
 
 	"semiclaw/app/internal/db"
+	"semiclaw/app/internal/promptbuilder"
 	"semiclaw/app/internal/provider"
 )
 
@@ -15,11 +19,29 @@ Be practical, clear, and action-oriented.
 Prefer short responses unless the user asks for details.`
 
 type Service struct {
-	store *db.Store
+	store                *db.Store
+	promptBuilderEnabled bool
+	promptBuilderMode    promptbuilder.PromptMode
 }
 
 func NewService(store *db.Store) *Service {
-	return &Service{store: store}
+	return &Service{
+		store:                store,
+		promptBuilderEnabled: false,
+		promptBuilderMode:    promptbuilder.PromptModeFull,
+	}
+}
+
+func (s *Service) ConfigurePromptBuilder(enabled bool, mode string) {
+	s.promptBuilderEnabled = enabled
+	switch promptbuilder.PromptMode(strings.ToLower(strings.TrimSpace(mode))) {
+	case promptbuilder.PromptModeMinimal:
+		s.promptBuilderMode = promptbuilder.PromptModeMinimal
+	case promptbuilder.PromptModeNone:
+		s.promptBuilderMode = promptbuilder.PromptModeNone
+	default:
+		s.promptBuilderMode = promptbuilder.PromptModeFull
+	}
 }
 
 func (s *Service) Chat(
@@ -198,10 +220,39 @@ func (s *Service) buildSystemPrompt(ctx context.Context, basePrompt string) (str
 	}
 
 	if len(lines) == 0 {
+		if s.promptBuilderEnabled {
+			return promptbuilder.Build(promptbuilder.BuildParams{
+				BasePrompt:     prompt,
+				Mode:           s.promptBuilderMode,
+				AvailableTools: []string{"shell", "browser", "python", "file"},
+				SkillsPrompt:   strings.TrimSpace(os.Getenv("SEMICLAW_SKILLS_PROMPT")),
+				Timezone:       strings.TrimSpace(time.Now().Location().String()),
+				Runtime: promptbuilder.RuntimeInfo{
+					OS:    runtime.GOOS,
+					Arch:  runtime.GOARCH,
+					Shell: strings.TrimSpace(os.Getenv("SHELL")),
+				},
+			}), nil
+		}
 		return prompt, nil
 	}
 
-	prompt += "\n\nUse this user profile context when relevant:"
-	prompt += "\n" + strings.Join(lines, "\n")
+	profileBlock := "Use this user profile context when relevant:\n" + strings.Join(lines, "\n")
+	if s.promptBuilderEnabled {
+		return promptbuilder.Build(promptbuilder.BuildParams{
+			BasePrompt:     prompt + "\n\n" + profileBlock,
+			Mode:           s.promptBuilderMode,
+			AvailableTools: []string{"shell", "browser", "python", "file"},
+			SkillsPrompt:   strings.TrimSpace(os.Getenv("SEMICLAW_SKILLS_PROMPT")),
+			Timezone:       strings.TrimSpace(time.Now().Location().String()),
+			Runtime: promptbuilder.RuntimeInfo{
+				OS:    runtime.GOOS,
+				Arch:  runtime.GOARCH,
+				Shell: strings.TrimSpace(os.Getenv("SHELL")),
+			},
+		}), nil
+	}
+
+	prompt += "\n\n" + profileBlock
 	return prompt, nil
 }

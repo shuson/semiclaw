@@ -18,7 +18,13 @@ func NewSessionManager(store *db.Store, memory *memorymd.Store) *SessionManager 
 	return &SessionManager{store: store, memory: memory}
 }
 
-func (m *SessionManager) BuildSession(ctx context.Context, ownerID, agentName, systemPrompt string) (SessionState, error) {
+func (m *SessionManager) BuildSession(
+	ctx context.Context,
+	ownerID, agentName, systemPrompt string,
+	skillsPrompt string,
+	userTimezone string,
+	runtime RuntimeMetadata,
+) (SessionState, error) {
 	history, err := m.store.GetRecentMessages(ctx, ownerID, 20)
 	if err != nil {
 		return SessionState{}, fmt.Errorf("load session history: %w", err)
@@ -43,6 +49,9 @@ func (m *SessionManager) BuildSession(ctx context.Context, ownerID, agentName, s
 		SystemPrompt:  strings.TrimSpace(systemPrompt),
 		History:       chatHistory,
 		MemoryContext: memoryContext,
+		SkillsPrompt:  strings.TrimSpace(skillsPrompt),
+		UserTimezone:  strings.TrimSpace(userTimezone),
+		Runtime:       runtime,
 		ToolPolicy: map[string]ToolPermission{
 			"shell":   {Allowed: true, RequireUserApproval: true},
 			"browser": {Allowed: true, RequireUserApproval: false},

@@ -25,6 +25,7 @@ func (r *Runner) maybeExecuteTasksFromMarkdown(
 	ctx context.Context,
 	activeAgent *db.AgentRecord,
 	activeProviderKind string,
+	userScope string,
 	message string,
 ) (string, bool, error) {
 	if !shouldExecuteTasksFromMarkdown(message) {
@@ -73,7 +74,7 @@ func (r *Runner) maybeExecuteTasksFromMarkdown(
 		}
 
 		if requiresHostCommandApproval(command) {
-			approved, approveErr := r.confirmHostCommand(command)
+			approved, approveErr := r.confirmHostCommand(userScope, command)
 			if approveErr != nil {
 				return "", false, fmt.Errorf("host command permission prompt failed: %w", approveErr)
 			}

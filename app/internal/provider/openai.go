@@ -128,7 +128,9 @@ func shouldRetryWithoutReasoning(statusCode int, body []byte) bool {
 	return strings.Contains(content, "reasoning") &&
 		(strings.Contains(content, "unknown") ||
 			strings.Contains(content, "unsupported") ||
-			strings.Contains(content, "invalid"))
+			strings.Contains(content, "invalid") ||
+			strings.Contains(content, "does not support") ||
+			strings.Contains(content, "not support"))
 }
 
 func (p *OpenAIProvider) IsAvailable(ctx context.Context) (bool, error) {
