@@ -21,8 +21,8 @@ A specified use case local focused. Surely, this is inspired by OpenClaw.
 - Built-in web agent auto-triggered from chat when URL crawling intent is detected
 - Agent-scoped markdown long-term memory at `~/.semiclaw/memory/<agent>/MEMORY.md` via chat intent (`remember: ...`)
 - Agent-scoped daily markdown memory logs at `~/.semiclaw/memory/<agent>/daily/YYYY-MM-DD.md`
-- Agent-scoped automation definitions at `~/.semiclaw/memory/<agent>/automations.md` via chat intent (`schedule: name | cron | prompt`)
-- Cron automation run logs at `~/.semiclaw/cron/<agent>/YYYY-MM-DD.md`
+- Agent-scoped cron definitions at `~/.semiclaw/cron/<agent>/CRON.md` via chat intent (`schedule: name | cron | prompt`)
+- Cron execution run logs at `~/.semiclaw/cron/<agent>/YYYY-MM-DD.md`
 - Chat history command
 - SQLite persistence for owner/config/secrets/messages
 - Optional provider API key (not required for local Ollama)
@@ -48,9 +48,14 @@ go run ./cmd/semiclaw help
 ```bash
 # use SEMICLAW_DEBUG_LLM=1 to enable debug
 semiclaw setup [--password <value>] [--api-key <value>] [--openai-base-url <url>] [--openai-api-key <key>] [--openai-model <model>] [--soul-seed <value>] [--skip-profile]
+semiclaw install
+semiclaw uninstall
 semiclaw login [--password <value>]
 semiclaw logout
 semiclaw status
+semiclaw daemon run [--once]
+semiclaw daemon status
+semiclaw daemon start|stop|restart
 semiclaw chat [message]
 semiclaw history [--limit 20]
 semiclaw agent list
@@ -65,6 +70,7 @@ semiclaw help
 ## Memory And Automation Intents
 - Long-term memory: `remember: I prefer short answers`
 - Cron automation memory: `schedule: daily_summary | 0 18 * * * | summarize key updates`
+- Scheduled automations execute only while the daemon is installed and running (`semiclaw install` or `semiclaw daemon start`)
 - Linux host command execution via natural-language requests (LLM infers command intent and executes safely)
 - Explicit chat override to auto-approve host shell commands for current session (`:allow-shell-all`), while still printing each command before execution
 - URL browsing/content retrieval: `visit https://example.com` or include any `http(s)://...` URL in chat

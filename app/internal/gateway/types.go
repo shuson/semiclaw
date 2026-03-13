@@ -20,6 +20,14 @@ type RuntimeMetadata struct {
 	Agent    string
 }
 
+type ToolPolicyMode string
+
+const (
+	ToolPolicyModeDefault             ToolPolicyMode = "default"
+	ToolPolicyModeAutomationSafe      ToolPolicyMode = "automation_safe"
+	ToolPolicyModeAutomationAllowAll  ToolPolicyMode = "automation_allow_all"
+)
+
 type SessionState struct {
 	SessionID     string
 	AgentName     string

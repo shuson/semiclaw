@@ -19,6 +19,7 @@ type AutomationJob struct {
 	CronExpr  string
 	TZ        string
 	Prompt    string
+	ApprovalMode string
 	NextRunAt time.Time
 	LastRunAt time.Time
 	UpdatedAt time.Time
@@ -48,6 +49,9 @@ func (s *Store) Ensure() error {
 		return err
 	}
 	if err := s.migrateLegacyLayoutUnlocked(); err != nil {
+		return err
+	}
+	if err := s.migrateAgentCronDefinitionsUnlocked(); err != nil {
 		return err
 	}
 	return nil
@@ -272,6 +276,9 @@ func (s *Store) UpsertAutomation(agentName string, job AutomationJob) error {
 	if strings.TrimSpace(job.TZ) == "" {
 		job.TZ = "UTC"
 	}
+	if strings.TrimSpace(job.ApprovalMode) == "" {
+		job.ApprovalMode = "deny_sensitive"
+	}
 	if job.UpdatedAt.IsZero() {
 		job.UpdatedAt = time.Now().UTC()
 	}
@@ -305,7 +312,7 @@ func (s *Store) ListAutomationScopes() ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := os.ReadDir(s.memoryRootDir)
+	entries, err := os.ReadDir(s.cronRootDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -434,6 +441,8 @@ func (s *Store) loadAutomationsUnlocked(agentName string) (map[string]Automation
 			job.TZ = val
 		case "prompt":
 			job.Prompt = val
+		case "approval_mode":
+			job.ApprovalMode = val
 		case "next_run_at":
 			job.NextRunAt, _ = time.Parse(time.RFC3339, val)
 		case "last_run_at":
@@ -461,7 +470,7 @@ func (s *Store) saveAutomationsUnlocked(agentName string, jobs map[string]Automa
 	sort.Strings(ids)
 
 	var b strings.Builder
-	b.WriteString("# Semiclaw Automations\n\n")
+	b.WriteString("# Semiclaw Cron\n\n")
 	for _, id := range ids {
 		job := jobs[id]
 		b.WriteString("## " + job.ID + "\n")
@@ -470,6 +479,7 @@ func (s *Store) saveAutomationsUnlocked(agentName string, jobs map[string]Automa
 		b.WriteString("- cron: " + quoteValue(job.CronExpr) + "\n")
 		b.WriteString("- tz: " + quoteValue(job.TZ) + "\n")
 		b.WriteString("- prompt: " + quoteValue(job.Prompt) + "\n")
+		b.WriteString("- approval_mode: " + quoteValue(job.ApprovalMode) + "\n")
 		if !job.NextRunAt.IsZero() {
 			b.WriteString("- next_run_at: " + job.NextRunAt.UTC().Format(time.RFC3339) + "\n")
 		} else {
@@ -500,10 +510,13 @@ func (s *Store) ensureAgentMemoryLayoutUnlocked(agentName string) error {
 	if err := os.MkdirAll(filepath.Join(s.agentMemoryDir(agentName), "daily"), 0o700); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(s.agentCronDir(agentName), 0o700); err != nil {
+		return err
+	}
 	if err := s.ensureFile(s.memoryFilePath(agentName), "# Semiclaw Memory\n\n## Entries\n"); err != nil {
 		return err
 	}
-	if err := s.ensureFile(s.automationsFilePath(agentName), "# Semiclaw Automations\n\n"); err != nil {
+	if err := s.ensureFile(s.automationsFilePath(agentName), "# Semiclaw Cron\n\n"); err != nil {
 		return err
 	}
 	return nil
@@ -543,6 +556,27 @@ func (s *Store) migrateLegacyLayoutUnlocked() error {
 	return s.ensureAgentMemoryLayoutUnlocked(defaultScope)
 }
 
+func (s *Store) migrateAgentCronDefinitionsUnlocked() error {
+	entries, err := os.ReadDir(s.memoryRootDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		agentName := sanitizeAgentScope(entry.Name())
+		legacyPath := filepath.Join(s.agentMemoryDir(agentName), "automations.md")
+		if err := moveIfPresent(legacyPath, s.automationsFilePath(agentName)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) agentMemoryDir(agentName string) string {
 	return filepath.Join(s.memoryRootDir, sanitizeAgentScope(agentName))
 }
@@ -556,7 +590,7 @@ func (s *Store) dailyFilePath(agentName string, day string) string {
 }
 
 func (s *Store) automationsFilePath(agentName string) string {
-	return filepath.Join(s.agentMemoryDir(agentName), "automations.md")
+	return filepath.Join(s.agentCronDir(agentName), "CRON.md")
 }
 
 func (s *Store) agentCronDir(agentName string) string {

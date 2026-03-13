@@ -10,11 +10,11 @@ import (
 
 type Scheduler struct {
 	store  *Store
-	onRun  func(context.Context, AutomationJob) error
+	onRun  func(context.Context, string, AutomationJob) error
 	ticker time.Duration
 }
 
-func NewScheduler(store *Store, ticker time.Duration, onRun func(context.Context, AutomationJob) error) *Scheduler {
+func NewScheduler(store *Store, ticker time.Duration, onRun func(context.Context, string, AutomationJob) error) *Scheduler {
 	if ticker <= 0 {
 		ticker = 30 * time.Second
 	}
@@ -42,6 +42,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 }
 
+func (s *Scheduler) RunOnce(ctx context.Context) error {
+	return s.tick(ctx)
+}
+
 func (s *Scheduler) tick(ctx context.Context) error {
 	scopes, err := s.store.ListAutomationScopes()
 	if err != nil {
@@ -60,7 +64,7 @@ func (s *Scheduler) tick(ctx context.Context) error {
 
 			runErr := error(nil)
 			if s.onRun != nil {
-				runErr = s.onRun(ctx, job)
+				runErr = s.onRun(ctx, agentName, job)
 			}
 			status := "success"
 			note := "executed"

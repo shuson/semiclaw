@@ -168,6 +168,10 @@ func (r *Runner) Run(ctx context.Context, args []string) error {
 		return nil
 	case "setup":
 		return r.runSetup(ctx, args[1:])
+	case "install":
+		return r.runInstall(ctx, args[1:])
+	case "uninstall":
+		return r.runUninstall(ctx, args[1:])
 	case "login":
 		return r.runLogin(ctx, args[1:])
 	case "logout":
@@ -180,6 +184,8 @@ func (r *Runner) Run(ctx context.Context, args []string) error {
 		return r.runHistory(ctx, args[1:])
 	case "agent":
 		return r.runAgent(ctx, args[1:])
+	case "daemon":
+		return r.runDaemon(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -686,6 +692,15 @@ func (r *Runner) runStatus(ctx context.Context) error {
 	fmt.Fprintln(r.stdout, out.kv("🧠 Agent Model", currentAgent.Model))
 	fmt.Fprintln(r.stdout, out.kv("🌐 Agent Base URL", currentAgent.BaseURL))
 	fmt.Fprintln(r.stdout, out.kv("🗂 Total Agents", strconv.Itoa(len(agents))))
+	if daemonState, daemonErr := r.detectDaemonStatus(ctx); daemonErr == nil {
+		state := "stopped"
+		if daemonState.Running {
+			state = "running"
+		} else if !daemonState.Installed {
+			state = "not installed"
+		}
+		fmt.Fprintln(r.stdout, out.kv("⚙ Daemon", state))
+	}
 	return nil
 }
 
@@ -1853,6 +1868,9 @@ func (r *Runner) handleMemoryIntents(agentName string, message string) (bool, er
 		fmt.Fprintln(r.stdout, out.kv("🆔 ID", job.ID))
 		fmt.Fprintln(r.stdout, out.kv("⏱ Cron", job.CronExpr))
 		fmt.Fprintln(r.stdout, out.kv("📅 Next Run", job.NextRunAt.Format(time.RFC3339)))
+		if daemonState, daemonErr := r.detectDaemonStatus(context.Background()); daemonErr == nil && !daemonState.Running {
+			fmt.Fprintln(r.stdout, out.warn("Daemon is not running. Scheduled jobs will not execute until `semiclaw install` or `semiclaw daemon start` is used."))
+		}
 		return true, nil
 	}
 	return false, nil
@@ -3463,14 +3481,15 @@ func parseAutomationIntent(message string) (memorymd.AutomationJob, bool) {
 	}
 
 	return memorymd.AutomationJob{
-		ID:        id,
-		Name:      name,
-		Enabled:   true,
-		CronExpr:  cronExpr,
-		TZ:        "UTC",
-		Prompt:    prompt,
-		NextRunAt: nextRun,
-		UpdatedAt: time.Now().UTC(),
+		ID:           id,
+		Name:         name,
+		Enabled:      true,
+		CronExpr:     cronExpr,
+		TZ:           "UTC",
+		Prompt:       prompt,
+		ApprovalMode: "deny_sensitive",
+		NextRunAt:    nextRun,
+		UpdatedAt:    time.Now().UTC(),
 	}, true
 }
 
@@ -3782,9 +3801,14 @@ func (r *Runner) printHelp() {
 	fmt.Fprintln(r.stdout, "")
 	fmt.Fprintln(r.stdout, out.section("Usage"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw setup")+" [--password <value>] [--api-key <value>] [--openai-base-url <url>] [--openai-api-key <key>] [--openai-model <model>] [--soul-seed <value>] [--skip-profile]")
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw install"))
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw uninstall"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw login")+" [--password <value>]")
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw logout"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw status"))
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw daemon run")+" [--once]")
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw daemon status"))
+	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw daemon start|stop|restart"))
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw chat")+" [message]")
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw history")+" [--limit 20]")
 	fmt.Fprintln(r.stdout, "  "+out.command("semiclaw agent list"))

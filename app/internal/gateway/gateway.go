@@ -54,6 +54,7 @@ type Request struct {
 	SkillsPrompt      string
 	UserTimezone      string
 	Runtime           RuntimeMetadata
+	ToolPolicyMode    ToolPolicyMode
 }
 
 func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) {
@@ -65,6 +66,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, req Request) (Result, error) 
 		req.SkillsPrompt,
 		req.UserTimezone,
 		req.Runtime,
+		req.ToolPolicyMode,
 	)
 	if err != nil {
 		return Result{}, err

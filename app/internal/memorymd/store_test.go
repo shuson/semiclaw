@@ -63,6 +63,40 @@ func TestAutomationRunsWrittenUnderCronScope(t *testing.T) {
 	}
 }
 
+func TestUpsertAutomation_DefaultsApprovalModeAndPersistsIt(t *testing.T) {
+	tmp := t.TempDir()
+	store := NewStore(tmp)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	job := AutomationJob{
+		ID:       "daily_summary",
+		Name:     "Daily Summary",
+		Enabled:  true,
+		CronExpr: "0 18 * * *",
+		TZ:       "UTC",
+		Prompt:   "summarize updates",
+	}
+	if err := store.UpsertAutomation("agent_a", job); err != nil {
+		t.Fatalf("UpsertAutomation() error = %v", err)
+	}
+
+	jobs, err := store.ListAutomations("agent_a")
+	if err != nil {
+		t.Fatalf("ListAutomations() error = %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("len(jobs) = %d, want 1", len(jobs))
+	}
+	if jobs[0].ApprovalMode != "deny_sensitive" {
+		t.Fatalf("ApprovalMode = %q, want deny_sensitive", jobs[0].ApprovalMode)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "cron", "agent_a", "CRON.md")); err != nil {
+		t.Fatalf("expected CRON.md to be written: %v", err)
+	}
+}
+
 func TestEnsureMigratesLegacyGlobalFiles(t *testing.T) {
 	tmp := t.TempDir()
 	legacyMemoryDir := filepath.Join(tmp, "memory")
@@ -93,14 +127,36 @@ func TestEnsureMigratesLegacyGlobalFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tmp, "memory", "semiclaw", "MEMORY.md")); err != nil {
 		t.Fatalf("expected migrated MEMORY.md: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "memory", "semiclaw", "automations.md")); err != nil {
-		t.Fatalf("expected migrated automations.md: %v", err)
+	if _, err := os.Stat(filepath.Join(tmp, "cron", "semiclaw", "CRON.md")); err != nil {
+		t.Fatalf("expected migrated CRON.md: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "memory", "semiclaw", "daily", "2026-03-09.md")); err != nil {
 		t.Fatalf("expected migrated daily file: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "cron", "semiclaw", "2026-03-09.md")); err != nil {
 		t.Fatalf("expected migrated automation run file: %v", err)
+	}
+}
+
+func TestEnsureMigratesAgentScopedAutomationFilesIntoCronDir(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "memory", "agent_a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "memory", "agent_a", "automations.md"), []byte("# old cron"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(tmp)
+	if err := store.Ensure(); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmp, "cron", "agent_a", "CRON.md")); err != nil {
+		t.Fatalf("expected migrated agent CRON.md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "memory", "agent_a", "automations.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy automations.md to move away, stat err = %v", err)
 	}
 }
 

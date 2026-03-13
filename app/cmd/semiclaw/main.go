@@ -54,10 +54,6 @@ func main() {
 	if err := memoryStore.Ensure(); err != nil {
 		log.Fatalf("Failed to initialize markdown memory: %v", err)
 	}
-	scheduler := memorymd.NewScheduler(memoryStore, 30*time.Second, func(ctx context.Context, job memorymd.AutomationJob) error {
-		return nil
-	})
-	go scheduler.Start(context.Background())
 
 	runner := cli.NewRunner(cfg, store, secretBox, agentService, crawler, hostCommandRunner, pythonRunner, fileRunner, memoryStore, version, os.Stdin, os.Stdout, os.Stderr)
 
