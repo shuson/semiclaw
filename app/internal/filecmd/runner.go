@@ -51,7 +51,7 @@ func (r *Runner) Execute(ctx context.Context, req Request) (Result, error) {
 		return Result{}, errors.New("file path is required")
 	}
 
-	resolved, err := r.resolvePath(path)
+	resolved, err := r.resolvePath(action, path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -99,8 +99,9 @@ func (r *Runner) Execute(ctx context.Context, req Request) (Result, error) {
 	}
 }
 
-func (r *Runner) resolvePath(path string) (string, error) {
+func (r *Runner) resolvePath(action string, path string) (string, error) {
 	candidate := strings.TrimSpace(path)
+	allowAbsolute := action == "read" || action == "list"
 	if !filepath.IsAbs(candidate) {
 		candidate = filepath.Join(r.baseDir, candidate)
 	}
@@ -111,6 +112,9 @@ func (r *Runner) resolvePath(path string) (string, error) {
 	cleanPath, err := filepath.Abs(candidate)
 	if err != nil {
 		return "", err
+	}
+	if allowAbsolute && filepath.IsAbs(strings.TrimSpace(path)) {
+		return cleanPath, nil
 	}
 	if cleanPath != cleanBase && !strings.HasPrefix(cleanPath, cleanBase+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path %q is outside allowed workspace", path)
